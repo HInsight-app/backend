@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  db:
+    # We use the Alpine version to keep the download small and fast
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: localpassword
+      POSTGRES_DB: hinsight_local
+    ports:
+      # Maps your local machine's port 5432 to the container's port 5432
+      - "5432:5432"
+    volumes:
+      # CRITICAL: This ensures your data isn't deleted when the container stops
+      - hinsight_db_data:/var/lib/postgresql/data
+
+volumes:
+  hinsight_db_data:

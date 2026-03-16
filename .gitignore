@@ -1,0 +1,9 @@
+# Binaries
+hinsight-api
+*.exe
+
+# Environments
+.env
+
+# Go workspace
+vendor/
