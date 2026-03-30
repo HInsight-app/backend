@@ -1,0 +1,27 @@
+name: Deploy Backend to DigitalOcean
+
+on:
+  push:
+    branches:
+      - prod-main 
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DROPLET_IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /root/backend
+            
+            git fetch origin
+            git checkout prod-main
+            git reset --hard origin/prod-main
+            
+            docker compose up -d --build app
+            
+            docker compose up migrate
