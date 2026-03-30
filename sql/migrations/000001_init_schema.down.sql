@@ -1,0 +1,11 @@
+DROP TABLE IF EXISTS ai_insights;
+DROP TABLE IF EXISTS evaluations;
+DROP TABLE IF EXISTS decision_outcomes;
+DROP TABLE IF EXISTS options;
+DROP TABLE IF EXISTS decision_tags;
+DROP TABLE IF EXISTS decisions;
+DROP TABLE IF EXISTS tags;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS oauth_identities;
+DROP TABLE IF EXISTS local_credentials;
+DROP TABLE IF EXISTS users;

@@ -1,20 +1,49 @@
-version: '3.8'
-
 services:
   db:
-    # We use the Alpine version to keep the download small and fast
-    image: postgres:15-alpine
+    image: postgres:15.6-alpine3.19
     restart: always
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: localpassword
-      POSTGRES_DB: hinsight_local
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
     ports:
-      # Maps your local machine's port 5432 to the container's port 5432
-      - "5432:5432"
+      - "${DB_PORT}:5432"
     volumes:
-      # CRITICAL: This ensures your data isn't deleted when the container stops
       - hinsight_db_data:/var/lib/postgresql/data
-
+      # - ./sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+  migrate:
+    image: migrate/migrate
+    volumes:
+      - ./sql/migrations:/migrations
+    command:
+      - -path=/migrations
+      - -database=postgres://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}?sslmode=disable
+      - up
+    depends_on:
+      db:
+        condition: service_healthy
+  app:
+    build: .
+    restart: always
+    ports:
+      - "${PORT}:${PORT}"
+    environment:
+      PORT: ${PORT}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: 5432
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+ 
 volumes:
   hinsight_db_data:
