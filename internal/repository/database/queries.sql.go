@@ -12,6 +12,27 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const cleanupOldSessions = `-- name: CleanupOldSessions :exec
+DELETE FROM sessions 
+WHERE id IN (
+    SELECT s.id 
+    FROM sessions s 
+    WHERE s.user_id = $1 
+    ORDER BY s.created_at DESC 
+    OFFSET $2
+)
+`
+
+type CleanupOldSessionsParams struct {
+	UserID uuid.UUID `json:"user_id"`
+	Offset int32     `json:"offset"`
+}
+
+func (q *Queries) CleanupOldSessions(ctx context.Context, arg CleanupOldSessionsParams) error {
+	_, err := q.db.Exec(ctx, cleanupOldSessions, arg.UserID, arg.Offset)
+	return err
+}
+
 const createDecision = `-- name: CreateDecision :one
 
 INSERT INTO decisions (user_id, title) 
