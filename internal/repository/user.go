@@ -125,3 +125,7 @@ func (r *userRepository) GetSessionByToken(ctx context.Context, tokenHash string
 		ExpiresAt: row.ExpiresAt.Time,
 	}, nil
 }
+
+func (r *userRepository) RevokeSession(ctx context.Context, tokenHash string) error {
+	return r.q.DeleteSessionByToken(ctx, tokenHash)
+}

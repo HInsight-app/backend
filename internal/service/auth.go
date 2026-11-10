@@ -26,6 +26,7 @@ type AuthService interface {
 	Register(ctx context.Context, req request.RegisterRequest, userAgent, ipAddress string, remember bool) (response.AuthResponse, error)
 	Login(ctx context.Context, req request.LoginRequest, userAgent, ipAddress string, remember bool) (response.AuthResponse, error)
 	ValidateSession(ctx context.Context, rawToken string) (domain.Session, error)
+	Logout(ctx context.Context, rawToken string) error
 }
 
 type authService struct {
@@ -114,6 +115,10 @@ func (s *authService) ValidateSession(ctx context.Context, rawToken string) (dom
 		return domain.Session{}, errors.New("invalid or expired session")
 	}
 	return session, nil
+}
+
+func (s *authService) Logout(ctx context.Context, rawToken string) error {
+	return s.repo.RevokeSession(ctx, hashToken(rawToken))
 }
 
 // createSession generates a secure token, persists its hash, and returns the
