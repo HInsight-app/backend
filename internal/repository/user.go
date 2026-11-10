@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"log"
 
 	"backend/internal/domain"
 	"backend/internal/repository/database"
@@ -94,6 +95,13 @@ func (r *userRepository) GetPasswordHash(ctx context.Context, userID uuid.UUID) 
 }
 
 func (r *userRepository) CreateSession(ctx context.Context, session domain.Session) error {
+	err := r.q.CleanupOldSessions(ctx, database.CleanupOldSessionsParams{
+		UserID: session.UserID,
+		Offset: 2,
+	})
+	if err != nil {
+		log.Printf("failed to cleanup sessions: %v", err)
+	}
 	return r.q.CreateSession(ctx, database.CreateSessionParams{
 		UserID:    session.UserID,
 		Token:     session.Token,

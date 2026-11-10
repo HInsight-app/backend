@@ -30,6 +30,15 @@ SELECT user_id, expires_at
 FROM sessions 
 WHERE token = $1 AND expires_at > NOW() LIMIT 1;
 
+-- name: CleanupOldSessions :exec
+DELETE FROM sessions 
+WHERE id IN (
+    SELECT s.id 
+    FROM sessions s 
+    WHERE s.user_id = $1 
+    ORDER BY s.created_at DESC 
+    OFFSET $2
+);
 
 -- ==========================================
 -- DECISION QUERIES
