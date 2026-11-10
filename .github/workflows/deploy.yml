@@ -16,7 +16,7 @@ jobs:
           username: ${{ secrets.AZURE_VM_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /backend
+            cd ~/backend
             
             git fetch origin
             git checkout prod-main
