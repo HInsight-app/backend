@@ -1,4 +1,4 @@
-name: Deploy Backend to DigitalOcean
+name: Deploy Backend to Azure VM
 
 on:
   push:
@@ -12,11 +12,11 @@ jobs:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.DROPLET_IP }}
-          username: root
+          host: ${{ secrets.AZURE_IP }}
+          username: ${{ secrets.AZURE_VM_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /root/backend
+            cd ~/backend
             
             git fetch origin
             git checkout prod-main
