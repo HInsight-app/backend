@@ -40,17 +40,6 @@ WHERE id IN (
     OFFSET $2
 );
 
--- ==========================================
--- DECISION QUERIES
--- ==========================================
-
--- name: CreateDecision :one
-INSERT INTO decisions (user_id, title) 
-VALUES ($1, $2) 
-RETURNING id;
-
--- name: GetDecisionsByUserId :many
-SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at 
-FROM decisions 
-WHERE user_id = $1 AND deleted_at IS NULL
-ORDER BY created_at DESC;
+-- name: DeleteSessionByToken :exec
+DELETE FROM sessions
+WHERE token = $1;

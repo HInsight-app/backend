@@ -1,4 +1,4 @@
-package dto
+package response
 
 type AuthResponse struct {
 	User  UserResponse `json:"user"`
