@@ -2,9 +2,17 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
+)
+
+var (
+	ErrDecisionNotFound             = errors.New("decision not found")
+	ErrCannotDeleteChosenOption     = errors.New("cannot delete chosen option")
+	ErrAlreadyDeleted               = errors.New("decision already deleted")
+	ErrEvaluationRequiresCommitment = errors.New("cannot evaluate an uncommitted decision")
 )
 
 // ErrConflict is returned when an update/delete is attempted against an older version (LWW).
@@ -55,19 +63,53 @@ type Decision struct {
 	CreatedAt           time.Time        `json:"created_at"`
 	UpdatedAt           time.Time        `json:"updated_at"`
 	DeletedAt           *time.Time       `json:"deleted_at,omitempty"`
+	IdempotencyKey      *string          `json:"idempotency_key,omitempty"`
 	Options             []Option         `json:"options"`
 	Outcome             *DecisionOutcome `json:"outcome,omitempty"`
 	Evaluation          *Evaluation      `json:"evaluation,omitempty"`
 	Tags                []Tag            `json:"tags"`
 }
 
+// SyncOption represents an option item in the aggregate sync payload.
+type SyncOption struct {
+	ID        *uuid.UUID
+	ClientKey *string
+	Title     string
+	Pros      *string
+	Cons      *string
+}
+
+// SyncOutcome represents an outcome item in the aggregate sync payload.
+type SyncOutcome struct {
+	ChosenOptionID  *uuid.UUID
+	ChosenOptionKey *string
+	CommitmentNote  *string
+	DecidedAt       *time.Time
+}
+
+// SyncDecisionData represents the aggregate whole-decision sync input.
+type SyncDecisionData struct {
+	Title               string
+	Context             *string
+	ConfidenceBefore    *int
+	ScheduledReviewDate *time.Time
+	CreatedAt           *time.Time
+	LocalUpdatedAt      time.Time
+	TagIDs              []uuid.UUID
+	Options             []SyncOption
+	Outcome             *SyncOutcome
+}
+
 // DecisionRepository defines data operations on decisions and related entities.
 type DecisionRepository interface {
 	Create(ctx context.Context, d Decision, initialOptions []Option, initialTagIDs []uuid.UUID) (Decision, error)
 	GetByID(ctx context.Context, id, userID uuid.UUID) (Decision, error)
+	GetByIdempotencyKey(ctx context.Context, userID uuid.UUID, key string) (Decision, error)
 	GetActiveByUserID(ctx context.Context, userID uuid.UUID) ([]Decision, error)
+	ListUpdatedSince(ctx context.Context, userID uuid.UUID, updatedSince time.Time) ([]Decision, error)
 	UpdateWithLWW(ctx context.Context, d Decision, localUpdatedAt time.Time) (Decision, error)
 	SoftDeleteWithLWW(ctx context.Context, id, userID uuid.UUID, localUpdatedAt *time.Time) error
+	SyncDecision(ctx context.Context, id, userID uuid.UUID, data SyncDecisionData) (Decision, error)
 
 	CreateOption(ctx context.Context, opt Option) (Option, error)
 	DeleteOption(ctx context.Context, optionID, decisionID, userID uuid.UUID) error
@@ -82,18 +124,20 @@ type DecisionRepository interface {
 
 // DecisionService defines business logic operations.
 type DecisionService interface {
-	CreateDecision(ctx context.Context, userID uuid.UUID, title string, contextStr *string, confidenceBefore *int, reviewDate *time.Time, initialOptions []Option, initialTagIDs []uuid.UUID) (Decision, error)
+	CreateDecision(ctx context.Context, userID uuid.UUID, title string, contextStr *string, confidenceBefore *int, reviewDate *time.Time, initialOptions []Option, initialTagIDs []uuid.UUID, createdAt *time.Time, idempotencyKey *string) (Decision, error)
 	GetDecision(ctx context.Context, id, userID uuid.UUID) (Decision, error)
-	ListDecisions(ctx context.Context, userID uuid.UUID) ([]Decision, error)
+	ListDecisions(ctx context.Context, userID uuid.UUID, updatedSince *time.Time) ([]Decision, error)
 	UpdateDecision(ctx context.Context, userID uuid.UUID, id uuid.UUID, title string, contextStr *string, confidenceBefore *int, reviewDate *time.Time, localUpdatedAt time.Time) (Decision, error)
 	DeleteDecision(ctx context.Context, id, userID uuid.UUID, localUpdatedAt *time.Time) error
 
 	AddOption(ctx context.Context, decisionID, userID uuid.UUID, title string, pros, cons *string) (Option, error)
 	DeleteOption(ctx context.Context, optionID, decisionID, userID uuid.UUID) error
 
-	CommitDecision(ctx context.Context, decisionID, userID, chosenOptionID uuid.UUID, commitmentNote *string) (DecisionOutcome, error)
+	CommitDecision(ctx context.Context, decisionID, userID, chosenOptionID uuid.UUID, commitmentNote *string, decidedAt *time.Time) (DecisionOutcome, error)
 	CreateEvaluation(ctx context.Context, decisionID, userID uuid.UUID, satisfactionAfter, confidenceAfter int, hindsightNotes string) (Evaluation, error)
 
 	AttachTag(ctx context.Context, decisionID, tagID, userID uuid.UUID) error
 	DetachTag(ctx context.Context, decisionID, tagID, userID uuid.UUID) error
+
+	SyncDecision(ctx context.Context, id, userID uuid.UUID, data SyncDecisionData) (Decision, error)
 }
