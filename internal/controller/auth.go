@@ -2,6 +2,7 @@ package controller
 
 import (
 	"net/http"
+	"strings"
 
 	request "backend/internal/dto/request"
 	"backend/internal/service"
@@ -23,6 +24,7 @@ func NewAuthController(e *echo.Echo, svc service.AuthService) {
 	authGroup := e.Group("/auth")
 	authGroup.POST("/register", ctrl.Register)
 	authGroup.POST("/login", ctrl.Login)
+	authGroup.POST("/logout", ctrl.Logout)
 }
 
 func (ctrl *AuthController) Register(c echo.Context) error {
@@ -38,7 +40,7 @@ func (ctrl *AuthController) Register(c echo.Context) error {
 	// 2. Bind Request
 	var req request.RegisterRequest
 	if err = c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
+		return errorResponse(c, http.StatusBadRequest, errInvalidPayload)
 	}
 
 	// 3. Validate Request
@@ -69,7 +71,7 @@ func (ctrl *AuthController) Login(c echo.Context) error {
 	// 2. Bind Request
 	var req request.LoginRequest
 	if err = c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
+		return errorResponse(c, http.StatusBadRequest, errInvalidPayload)
 	}
 
 	// 3. Validate Request
@@ -90,4 +92,15 @@ func (ctrl *AuthController) Login(c echo.Context) error {
 
 	// 6. Return Response
 	return c.JSON(http.StatusOK, res)
+}
+
+func (ctrl *AuthController) Logout(c echo.Context) error {
+	authHeader := c.Request().Header.Get("Authorization")
+	rawToken := strings.TrimPrefix(authHeader, "Bearer ")
+	if rawToken != "" && rawToken != authHeader {
+		if err := ctrl.service.Logout(c.Request().Context(), rawToken); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to logout"})
+		}
+	}
+	return c.JSON(http.StatusOK, map[string]string{"message": "Logged out successfully"})
 }

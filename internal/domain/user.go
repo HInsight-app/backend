@@ -36,4 +36,5 @@ type UserRepository interface {
 	GetPasswordHash(ctx context.Context, userID uuid.UUID) (string, error)
 	CreateSession(ctx context.Context, session Session) error
 	GetSessionByToken(ctx context.Context, tokenHash string) (Session, error)
+	RevokeSession(ctx context.Context, tokenHash string) error
 }
