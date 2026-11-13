@@ -28,11 +28,13 @@ func main() {
 	e.Use(middleware.Recover())
 
 	// 2. Dependency Injection: Repositories
-	// decisionRepo := repository.NewDecisionRepository(pool)
+	decisionRepo := repository.NewDecisionRepository(pool)
+	tagRepo := repository.NewTagRepository(pool)
 	userRepo := repository.NewUserRepository(pool)
 
 	// 3. Dependency Injection: Services
-	// decisionService := service.NewDecisionService(decisionRepo)
+	decisionService := service.NewDecisionService(decisionRepo)
+	tagService := service.NewTagService(tagRepo)
 	authService := service.NewAuthService(userRepo)
 
 	// 4. Mount Routes
@@ -42,7 +44,8 @@ func main() {
 	protected := e.Group("")
 	protected.Use(appMiddleware.AuthMiddleware(authService))
 
-	// controller.NewDecisionController(protected, decisionService)
+	controller.NewDecisionController(protected, decisionService)
+	controller.NewTagController(protected, tagService)
 
 	// 5. Start Server
 	e.Logger.Fatal(e.Start("0.0.0.0:8080"))
