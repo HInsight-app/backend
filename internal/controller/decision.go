@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"backend/internal/domain"
@@ -25,6 +26,7 @@ func NewDecisionController(e *echo.Group, svc domain.DecisionService) {
 	e.GET("/decisions/:id", ctrl.GetByID)
 	e.POST("/decisions/:id/update", ctrl.Update)
 	e.POST("/decisions/:id/delete", ctrl.Delete)
+	e.POST("/decisions/:id/sync", ctrl.Sync)
 
 	e.POST("/decisions/:id/options", ctrl.AddOption)
 	e.POST("/decisions/:id/options/:option_id/delete", ctrl.DeleteOption)
@@ -64,7 +66,13 @@ func (ctrl *DecisionController) Create(c echo.Context) error {
 		}
 	}
 
-	created, err := ctrl.service.CreateDecision(c.Request().Context(), userID, req.Title, req.Context, req.ConfidenceBefore, reviewDate, initialOptions, req.TagIDs)
+	idempHeader := strings.TrimSpace(c.Request().Header.Get("Idempotency-Key"))
+	var idempKey *string
+	if idempHeader != "" {
+		idempKey = &idempHeader
+	}
+
+	created, err := ctrl.service.CreateDecision(c.Request().Context(), userID, req.Title, req.Context, req.ConfidenceBefore, reviewDate, initialOptions, req.TagIDs, req.CreatedAt, idempKey)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -78,7 +86,16 @@ func (ctrl *DecisionController) List(c echo.Context) error {
 		return errorResponse(c, http.StatusUnauthorized, errUserContextLost)
 	}
 
-	decisions, err := ctrl.service.ListDecisions(c.Request().Context(), userID)
+	var updatedSince *time.Time
+	if q := c.QueryParam("updated_since"); q != "" {
+		t, err := time.Parse(time.RFC3339, q)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid updated_since timestamp format, must be RFC3339"})
+		}
+		updatedSince = &t
+	}
+
+	decisions, err := ctrl.service.ListDecisions(c.Request().Context(), userID, updatedSince)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to fetch decisions"})
 	}
@@ -104,7 +121,10 @@ func (ctrl *DecisionController) GetByID(c echo.Context) error {
 
 	d, err := ctrl.service.GetDecision(c.Request().Context(), id, userID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+		if errors.Is(err, domain.ErrDecisionNotFound) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Decision not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
 	return c.JSON(http.StatusOK, toDecisionResponse(d))
@@ -136,6 +156,9 @@ func (ctrl *DecisionController) Update(c echo.Context) error {
 
 	updated, err := ctrl.service.UpdateDecision(c.Request().Context(), userID, id, req.Title, req.Context, req.ConfidenceBefore, reviewDate, req.LocalUpdatedAt)
 	if err != nil {
+		if errors.Is(err, domain.ErrDecisionNotFound) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Decision not found"})
+		}
 		var conflictErr *domain.ErrConflict
 		if errors.As(err, &conflictErr) {
 			return c.JSON(http.StatusConflict, response.ConflictResponse{
@@ -164,6 +187,9 @@ func (ctrl *DecisionController) Delete(c echo.Context) error {
 	_ = c.Bind(&req) // Optional payload with local_updated_at
 
 	if err := ctrl.service.DeleteDecision(c.Request().Context(), id, userID, req.LocalUpdatedAt); err != nil {
+		if errors.Is(err, domain.ErrDecisionNotFound) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Decision not found"})
+		}
 		var conflictErr *domain.ErrConflict
 		if errors.As(err, &conflictErr) {
 			return c.JSON(http.StatusConflict, response.ConflictResponse{
@@ -175,6 +201,81 @@ func (ctrl *DecisionController) Delete(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"message": "Decision deleted successfully"})
+}
+
+func (ctrl *DecisionController) Sync(c echo.Context) error {
+	userID, ok := c.Get("user_id").(uuid.UUID)
+	if !ok {
+		return errorResponse(c, http.StatusUnauthorized, errUserContextLost)
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid decision ID"})
+	}
+
+	var req request.SyncDecisionRequest
+	if err := c.Bind(&req); err != nil {
+		return errorResponse(c, http.StatusBadRequest, errInvalidPayload)
+	}
+	if err := c.Validate(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
+	reviewDate, err := parseDate(req.ScheduledReviewDate)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
+	options := make([]domain.SyncOption, len(req.Options))
+	for i, o := range req.Options {
+		options[i] = domain.SyncOption{
+			ID:        o.ID,
+			ClientKey: o.ClientKey,
+			Title:     o.Title,
+			Pros:      o.Pros,
+			Cons:      o.Cons,
+		}
+	}
+
+	var outcome *domain.SyncOutcome
+	if req.Outcome != nil {
+		outcome = &domain.SyncOutcome{
+			ChosenOptionID:  req.Outcome.ChosenOptionID,
+			ChosenOptionKey: req.Outcome.ChosenOptionKey,
+			CommitmentNote:  req.Outcome.CommitmentNote,
+			DecidedAt:       req.Outcome.DecidedAt,
+		}
+	}
+
+	data := domain.SyncDecisionData{
+		Title:               req.Title,
+		Context:             req.Context,
+		ConfidenceBefore:    req.ConfidenceBefore,
+		ScheduledReviewDate: reviewDate,
+		CreatedAt:           req.CreatedAt,
+		LocalUpdatedAt:      req.LocalUpdatedAt,
+		TagIDs:              req.TagIDs,
+		Options:             options,
+		Outcome:             outcome,
+	}
+
+	synced, err := ctrl.service.SyncDecision(c.Request().Context(), id, userID, data)
+	if err != nil {
+		if errors.Is(err, domain.ErrDecisionNotFound) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Decision not found"})
+		}
+		var conflictErr *domain.ErrConflict
+		if errors.As(err, &conflictErr) {
+			return c.JSON(http.StatusConflict, response.ConflictResponse{
+				Error:    "Conflict: server has newer version",
+				Decision: toDecisionResponse(conflictErr.ServerDecision),
+			})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	return c.JSON(http.StatusOK, toDecisionResponse(synced))
 }
 
 func (ctrl *DecisionController) AddOption(c echo.Context) error {
@@ -198,6 +299,9 @@ func (ctrl *DecisionController) AddOption(c echo.Context) error {
 
 	opt, err := ctrl.service.AddOption(c.Request().Context(), decisionID, userID, req.Title, req.Pros, req.Cons)
 	if err != nil {
+		if errors.Is(err, domain.ErrDecisionNotFound) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Decision not found"})
+		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
@@ -221,8 +325,11 @@ func (ctrl *DecisionController) DeleteOption(c echo.Context) error {
 	}
 
 	if err := ctrl.service.DeleteOption(c.Request().Context(), optionID, decisionID, userID); err != nil {
-		if err.Error() == "cannot delete option chosen for this decision's commitment" {
-			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		if errors.Is(err, domain.ErrCannotDeleteChosenOption) {
+			return c.JSON(http.StatusConflict, map[string]string{"error": "Cannot delete chosen option"})
+		}
+		if errors.Is(err, domain.ErrDecisionNotFound) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Decision not found"})
 		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -249,8 +356,11 @@ func (ctrl *DecisionController) Commit(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
-	outcome, err := ctrl.service.CommitDecision(c.Request().Context(), decisionID, userID, req.ChosenOptionID, req.CommitmentNote)
+	outcome, err := ctrl.service.CommitDecision(c.Request().Context(), decisionID, userID, req.ChosenOptionID, req.CommitmentNote, req.DecidedAt)
 	if err != nil {
+		if errors.Is(err, domain.ErrDecisionNotFound) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Decision not found"})
+		}
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
@@ -278,8 +388,11 @@ func (ctrl *DecisionController) CreateEvaluation(c echo.Context) error {
 
 	eval, err := ctrl.service.CreateEvaluation(c.Request().Context(), decisionID, userID, req.SatisfactionAfter, req.ConfidenceAfter, req.HindsightNotes)
 	if err != nil {
-		if err.Error() == "decision must be committed before it can be evaluated" {
+		if errors.Is(err, domain.ErrEvaluationRequiresCommitment) {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		if errors.Is(err, domain.ErrDecisionNotFound) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Decision not found"})
 		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -307,6 +420,9 @@ func (ctrl *DecisionController) AttachTag(c echo.Context) error {
 	}
 
 	if err := ctrl.service.AttachTag(c.Request().Context(), decisionID, req.TagID, userID); err != nil {
+		if errors.Is(err, domain.ErrDecisionNotFound) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Decision not found"})
+		}
 		if err.Error() == "tag not found" {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "Tag not found"})
 		}
@@ -333,6 +449,9 @@ func (ctrl *DecisionController) DetachTag(c echo.Context) error {
 	}
 
 	if err := ctrl.service.DetachTag(c.Request().Context(), decisionID, tagID, userID); err != nil {
+		if errors.Is(err, domain.ErrDecisionNotFound) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Decision not found"})
+		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
@@ -395,6 +514,7 @@ func toDecisionResponse(d domain.Decision) response.DecisionResponse {
 		ScheduledReviewDate: reviewDateStr,
 		CreatedAt:           d.CreatedAt,
 		UpdatedAt:           d.UpdatedAt,
+		DeletedAt:           d.DeletedAt,
 		Options:             options,
 		Outcome:             toOutcomeResponse(d.Outcome),
 		Evaluation:          toEvaluationResponse(d.Evaluation),

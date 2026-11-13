@@ -28,10 +28,20 @@ func (s *decisionService) CreateDecision(
 	reviewDate *time.Time,
 	initialOptions []domain.Option,
 	initialTagIDs []uuid.UUID,
+	createdAt *time.Time,
+	idempotencyKey *string,
 ) (domain.Decision, error) {
 	cleanTitle := strings.TrimSpace(title)
 	if cleanTitle == "" {
 		return domain.Decision{}, errors.New("title is required")
+	}
+
+	// Idempotency check: if an idempotency key was supplied, check if already created
+	if idempotencyKey != nil && *idempotencyKey != "" {
+		existing, err := s.repo.GetByIdempotencyKey(ctx, userID, *idempotencyKey)
+		if err == nil {
+			return existing, nil
+		}
 	}
 
 	cleanOptions := make([]domain.Option, 0, len(initialOptions))
@@ -53,6 +63,10 @@ func (s *decisionService) CreateDecision(
 		Context:             contextStr,
 		ConfidenceBefore:    confidenceBefore,
 		ScheduledReviewDate: reviewDate,
+		IdempotencyKey:      idempotencyKey,
+	}
+	if createdAt != nil && !createdAt.IsZero() {
+		d.CreatedAt = *createdAt
 	}
 
 	return s.repo.Create(ctx, d, cleanOptions, initialTagIDs)
@@ -62,7 +76,10 @@ func (s *decisionService) GetDecision(ctx context.Context, id, userID uuid.UUID)
 	return s.repo.GetByID(ctx, id, userID)
 }
 
-func (s *decisionService) ListDecisions(ctx context.Context, userID uuid.UUID) ([]domain.Decision, error) {
+func (s *decisionService) ListDecisions(ctx context.Context, userID uuid.UUID, updatedSince *time.Time) ([]domain.Decision, error) {
+	if updatedSince != nil && !updatedSince.IsZero() {
+		return s.repo.ListUpdatedSince(ctx, userID, *updatedSince)
+	}
 	return s.repo.GetActiveByUserID(ctx, userID)
 }
 
@@ -122,16 +139,19 @@ func (s *decisionService) DeleteOption(ctx context.Context, optionID, decisionID
 		return err
 	}
 	if decision.Outcome != nil && decision.Outcome.ChosenOptionID == optionID {
-		return errors.New("cannot delete option chosen for this decision's commitment")
+		return domain.ErrCannotDeleteChosenOption
 	}
 	return s.repo.DeleteOption(ctx, optionID, decisionID, userID)
 }
 
-func (s *decisionService) CommitDecision(ctx context.Context, decisionID, userID, chosenOptionID uuid.UUID, commitmentNote *string) (domain.DecisionOutcome, error) {
+func (s *decisionService) CommitDecision(ctx context.Context, decisionID, userID, chosenOptionID uuid.UUID, commitmentNote *string, decidedAt *time.Time) (domain.DecisionOutcome, error) {
 	outcome := domain.DecisionOutcome{
 		DecisionID:     decisionID,
 		ChosenOptionID: chosenOptionID,
 		CommitmentNote: commitmentNote,
+	}
+	if decidedAt != nil && !decidedAt.IsZero() {
+		outcome.DecidedAt = *decidedAt
 	}
 
 	return s.repo.UpsertOutcome(ctx, outcome, userID)
@@ -153,7 +173,7 @@ func (s *decisionService) CreateEvaluation(
 		return domain.Evaluation{}, err
 	}
 	if decision.Outcome == nil {
-		return domain.Evaluation{}, errors.New("decision must be committed before it can be evaluated")
+		return domain.Evaluation{}, domain.ErrEvaluationRequiresCommitment
 	}
 
 	eval := domain.Evaluation{
@@ -176,4 +196,14 @@ func (s *decisionService) DetachTag(ctx context.Context, decisionID, tagID, user
 		return err
 	}
 	return s.repo.RemoveTag(ctx, decisionID, tagID, userID)
+}
+
+func (s *decisionService) SyncDecision(ctx context.Context, id, userID uuid.UUID, data domain.SyncDecisionData) (domain.Decision, error) {
+	cleanTitle := strings.TrimSpace(data.Title)
+	if cleanTitle == "" {
+		return domain.Decision{}, errors.New("title is required")
+	}
+	data.Title = cleanTitle
+
+	return s.repo.SyncDecision(ctx, id, userID, data)
 }
