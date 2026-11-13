@@ -37,6 +37,10 @@ DELETE FROM decision_tags dt
 USING decisions d
 WHERE dt.decision_id = d.id AND dt.decision_id = $1 AND dt.tag_id = $2 AND d.user_id = $3;
 
+-- name: ClearTagsForDecision :exec
+DELETE FROM decision_tags
+WHERE decision_id = $1;
+
 -- name: GetTagsForDecision :many
 SELECT t.id, t.name, t.color_hex
 FROM tags t
