@@ -14,42 +14,44 @@ import (
 
 const createDecision = `-- name: CreateDecision :one
 
-INSERT INTO decisions (user_id, title, context, confidence_before, scheduled_review_date)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at
+INSERT INTO decisions (user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, idempotency_key)
+VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    COALESCE($6::timestamptz, NOW()),
+    COALESCE($6::timestamptz, NOW()),
+    $7
+)
+RETURNING id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
 `
 
 type CreateDecisionParams struct {
-	UserID              uuid.UUID   `json:"user_id"`
-	Title               string      `json:"title"`
-	Context             pgtype.Text `json:"context"`
-	ConfidenceBefore    pgtype.Int4 `json:"confidence_before"`
-	ScheduledReviewDate pgtype.Date `json:"scheduled_review_date"`
-}
-
-type CreateDecisionRow struct {
-	ID                  uuid.UUID          `json:"id"`
 	UserID              uuid.UUID          `json:"user_id"`
 	Title               string             `json:"title"`
 	Context             pgtype.Text        `json:"context"`
 	ConfidenceBefore    pgtype.Int4        `json:"confidence_before"`
 	ScheduledReviewDate pgtype.Date        `json:"scheduled_review_date"`
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	IdempotencyKey      pgtype.Text        `json:"idempotency_key"`
 }
 
 // ==========================================
 // DECISION QUERIES
 // ==========================================
-func (q *Queries) CreateDecision(ctx context.Context, arg CreateDecisionParams) (CreateDecisionRow, error) {
+func (q *Queries) CreateDecision(ctx context.Context, arg CreateDecisionParams) (Decision, error) {
 	row := q.db.QueryRow(ctx, createDecision,
 		arg.UserID,
 		arg.Title,
 		arg.Context,
 		arg.ConfidenceBefore,
 		arg.ScheduledReviewDate,
+		arg.CreatedAt,
+		arg.IdempotencyKey,
 	)
-	var i CreateDecisionRow
+	var i Decision
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
@@ -59,6 +61,8 @@ func (q *Queries) CreateDecision(ctx context.Context, arg CreateDecisionParams) 
 		&i.ScheduledReviewDate,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.IdempotencyKey,
 	)
 	return i, err
 }
@@ -151,32 +155,21 @@ func (q *Queries) DeleteOptionByID(ctx context.Context, arg DeleteOptionByIDPara
 }
 
 const getActiveDecisionsByUserID = `-- name: GetActiveDecisionsByUserID :many
-SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at
+SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
 FROM decisions
 WHERE user_id = $1 AND deleted_at IS NULL
 ORDER BY created_at DESC
 `
 
-type GetActiveDecisionsByUserIDRow struct {
-	ID                  uuid.UUID          `json:"id"`
-	UserID              uuid.UUID          `json:"user_id"`
-	Title               string             `json:"title"`
-	Context             pgtype.Text        `json:"context"`
-	ConfidenceBefore    pgtype.Int4        `json:"confidence_before"`
-	ScheduledReviewDate pgtype.Date        `json:"scheduled_review_date"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
-}
-
-func (q *Queries) GetActiveDecisionsByUserID(ctx context.Context, userID uuid.UUID) ([]GetActiveDecisionsByUserIDRow, error) {
+func (q *Queries) GetActiveDecisionsByUserID(ctx context.Context, userID uuid.UUID) ([]Decision, error) {
 	rows, err := q.db.Query(ctx, getActiveDecisionsByUserID, userID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []GetActiveDecisionsByUserIDRow
+	var items []Decision
 	for rows.Next() {
-		var i GetActiveDecisionsByUserIDRow
+		var i Decision
 		if err := rows.Scan(
 			&i.ID,
 			&i.UserID,
@@ -186,6 +179,8 @@ func (q *Queries) GetActiveDecisionsByUserID(ctx context.Context, userID uuid.UU
 			&i.ScheduledReviewDate,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.DeletedAt,
+			&i.IdempotencyKey,
 		); err != nil {
 			return nil, err
 		}
@@ -198,7 +193,7 @@ func (q *Queries) GetActiveDecisionsByUserID(ctx context.Context, userID uuid.UU
 }
 
 const getDecisionByID = `-- name: GetDecisionByID :one
-SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at
+SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
 FROM decisions
 WHERE id = $1 AND user_id = $2
 `
@@ -221,6 +216,37 @@ func (q *Queries) GetDecisionByID(ctx context.Context, arg GetDecisionByIDParams
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DeletedAt,
+		&i.IdempotencyKey,
+	)
+	return i, err
+}
+
+const getDecisionByIdempotencyKey = `-- name: GetDecisionByIdempotencyKey :one
+SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
+FROM decisions
+WHERE user_id = $1 AND idempotency_key = $2
+LIMIT 1
+`
+
+type GetDecisionByIdempotencyKeyParams struct {
+	UserID         uuid.UUID   `json:"user_id"`
+	IdempotencyKey pgtype.Text `json:"idempotency_key"`
+}
+
+func (q *Queries) GetDecisionByIdempotencyKey(ctx context.Context, arg GetDecisionByIdempotencyKeyParams) (Decision, error) {
+	row := q.db.QueryRow(ctx, getDecisionByIdempotencyKey, arg.UserID, arg.IdempotencyKey)
+	var i Decision
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Title,
+		&i.Context,
+		&i.ConfidenceBefore,
+		&i.ScheduledReviewDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.IdempotencyKey,
 	)
 	return i, err
 }
@@ -322,6 +348,49 @@ func (q *Queries) GetOptionsByDecisionID(ctx context.Context, decisionID uuid.UU
 	return items, nil
 }
 
+const listDecisionsUpdatedSince = `-- name: ListDecisionsUpdatedSince :many
+SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
+FROM decisions
+WHERE user_id = $1 AND updated_at > $2
+ORDER BY updated_at ASC
+`
+
+type ListDecisionsUpdatedSinceParams struct {
+	UserID    uuid.UUID          `json:"user_id"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) ListDecisionsUpdatedSince(ctx context.Context, arg ListDecisionsUpdatedSinceParams) ([]Decision, error) {
+	rows, err := q.db.Query(ctx, listDecisionsUpdatedSince, arg.UserID, arg.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Decision
+	for rows.Next() {
+		var i Decision
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Title,
+			&i.Context,
+			&i.ConfidenceBefore,
+			&i.ScheduledReviewDate,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+			&i.IdempotencyKey,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const softDeleteDecision = `-- name: SoftDeleteDecision :exec
 UPDATE decisions
 SET deleted_at = NOW(),
@@ -341,8 +410,8 @@ func (q *Queries) SoftDeleteDecision(ctx context.Context, arg SoftDeleteDecision
 
 const softDeleteDecisionWithLWW = `-- name: SoftDeleteDecisionWithLWW :execrows
 UPDATE decisions
-SET deleted_at = NOW(),
-    updated_at = NOW()
+SET deleted_at = COALESCE($3::timestamptz, NOW()),
+    updated_at = COALESCE($3::timestamptz, NOW())
 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL AND ($3::timestamptz IS NULL OR updated_at <= $3)
 `
 
@@ -368,7 +437,7 @@ SET title = $3,
     scheduled_review_date = $6,
     updated_at = NOW()
 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-RETURNING id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at
+RETURNING id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
 `
 
 type UpdateDecisionParams struct {
@@ -380,18 +449,7 @@ type UpdateDecisionParams struct {
 	ScheduledReviewDate pgtype.Date `json:"scheduled_review_date"`
 }
 
-type UpdateDecisionRow struct {
-	ID                  uuid.UUID          `json:"id"`
-	UserID              uuid.UUID          `json:"user_id"`
-	Title               string             `json:"title"`
-	Context             pgtype.Text        `json:"context"`
-	ConfidenceBefore    pgtype.Int4        `json:"confidence_before"`
-	ScheduledReviewDate pgtype.Date        `json:"scheduled_review_date"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
-}
-
-func (q *Queries) UpdateDecision(ctx context.Context, arg UpdateDecisionParams) (UpdateDecisionRow, error) {
+func (q *Queries) UpdateDecision(ctx context.Context, arg UpdateDecisionParams) (Decision, error) {
 	row := q.db.QueryRow(ctx, updateDecision,
 		arg.ID,
 		arg.UserID,
@@ -400,7 +458,7 @@ func (q *Queries) UpdateDecision(ctx context.Context, arg UpdateDecisionParams) 
 		arg.ConfidenceBefore,
 		arg.ScheduledReviewDate,
 	)
-	var i UpdateDecisionRow
+	var i Decision
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
@@ -410,6 +468,8 @@ func (q *Queries) UpdateDecision(ctx context.Context, arg UpdateDecisionParams) 
 		&i.ScheduledReviewDate,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.IdempotencyKey,
 	)
 	return i, err
 }
@@ -420,9 +480,9 @@ SET title = $3,
     context = $4,
     confidence_before = $5,
     scheduled_review_date = $6,
-    updated_at = NOW()
+    updated_at = $7
 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL AND updated_at <= $7
-RETURNING id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at
+RETURNING id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
 `
 
 type UpdateDecisionWithLWWParams struct {
@@ -435,18 +495,7 @@ type UpdateDecisionWithLWWParams struct {
 	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
 }
 
-type UpdateDecisionWithLWWRow struct {
-	ID                  uuid.UUID          `json:"id"`
-	UserID              uuid.UUID          `json:"user_id"`
-	Title               string             `json:"title"`
-	Context             pgtype.Text        `json:"context"`
-	ConfidenceBefore    pgtype.Int4        `json:"confidence_before"`
-	ScheduledReviewDate pgtype.Date        `json:"scheduled_review_date"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
-}
-
-func (q *Queries) UpdateDecisionWithLWW(ctx context.Context, arg UpdateDecisionWithLWWParams) (UpdateDecisionWithLWWRow, error) {
+func (q *Queries) UpdateDecisionWithLWW(ctx context.Context, arg UpdateDecisionWithLWWParams) (Decision, error) {
 	row := q.db.QueryRow(ctx, updateDecisionWithLWW,
 		arg.ID,
 		arg.UserID,
@@ -456,7 +505,7 @@ func (q *Queries) UpdateDecisionWithLWW(ctx context.Context, arg UpdateDecisionW
 		arg.ScheduledReviewDate,
 		arg.UpdatedAt,
 	)
-	var i UpdateDecisionWithLWWRow
+	var i Decision
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
@@ -466,6 +515,45 @@ func (q *Queries) UpdateDecisionWithLWW(ctx context.Context, arg UpdateDecisionW
 		&i.ScheduledReviewDate,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.IdempotencyKey,
+	)
+	return i, err
+}
+
+const updateOption = `-- name: UpdateOption :one
+UPDATE options
+SET title = $3,
+    pros = $4,
+    cons = $5
+WHERE id = $1 AND decision_id = $2
+RETURNING id, decision_id, title, pros, cons, created_at
+`
+
+type UpdateOptionParams struct {
+	ID         uuid.UUID   `json:"id"`
+	DecisionID uuid.UUID   `json:"decision_id"`
+	Title      string      `json:"title"`
+	Pros       pgtype.Text `json:"pros"`
+	Cons       pgtype.Text `json:"cons"`
+}
+
+func (q *Queries) UpdateOption(ctx context.Context, arg UpdateOptionParams) (Option, error) {
+	row := q.db.QueryRow(ctx, updateOption,
+		arg.ID,
+		arg.DecisionID,
+		arg.Title,
+		arg.Pros,
+		arg.Cons,
+	)
+	var i Option
+	err := row.Scan(
+		&i.ID,
+		&i.DecisionID,
+		&i.Title,
+		&i.Pros,
+		&i.Cons,
+		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -492,6 +580,40 @@ type UpsertDecisionOutcomeParams struct {
 // ==========================================
 func (q *Queries) UpsertDecisionOutcome(ctx context.Context, arg UpsertDecisionOutcomeParams) (DecisionOutcome, error) {
 	row := q.db.QueryRow(ctx, upsertDecisionOutcome, arg.DecisionID, arg.ChosenOptionID, arg.CommitmentNote)
+	var i DecisionOutcome
+	err := row.Scan(
+		&i.DecisionID,
+		&i.ChosenOptionID,
+		&i.CommitmentNote,
+		&i.DecidedAt,
+	)
+	return i, err
+}
+
+const upsertDecisionOutcomeWithTimestamp = `-- name: UpsertDecisionOutcomeWithTimestamp :one
+INSERT INTO decision_outcomes (decision_id, chosen_option_id, commitment_note, decided_at)
+VALUES ($1, $2, $3, COALESCE($4::timestamptz, NOW()))
+ON CONFLICT (decision_id) DO UPDATE
+SET chosen_option_id = EXCLUDED.chosen_option_id,
+    commitment_note = EXCLUDED.commitment_note,
+    decided_at = EXCLUDED.decided_at
+RETURNING decision_id, chosen_option_id, commitment_note, decided_at
+`
+
+type UpsertDecisionOutcomeWithTimestampParams struct {
+	DecisionID     uuid.UUID          `json:"decision_id"`
+	ChosenOptionID uuid.UUID          `json:"chosen_option_id"`
+	CommitmentNote pgtype.Text        `json:"commitment_note"`
+	DecidedAt      pgtype.Timestamptz `json:"decided_at"`
+}
+
+func (q *Queries) UpsertDecisionOutcomeWithTimestamp(ctx context.Context, arg UpsertDecisionOutcomeWithTimestampParams) (DecisionOutcome, error) {
+	row := q.db.QueryRow(ctx, upsertDecisionOutcomeWithTimestamp,
+		arg.DecisionID,
+		arg.ChosenOptionID,
+		arg.CommitmentNote,
+		arg.DecidedAt,
+	)
 	var i DecisionOutcome
 	err := row.Scan(
 		&i.DecisionID,

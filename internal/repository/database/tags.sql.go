@@ -32,6 +32,16 @@ func (q *Queries) AddTagToDecision(ctx context.Context, arg AddTagToDecisionPara
 	return result.RowsAffected(), nil
 }
 
+const clearTagsForDecision = `-- name: ClearTagsForDecision :exec
+DELETE FROM decision_tags
+WHERE decision_id = $1
+`
+
+func (q *Queries) ClearTagsForDecision(ctx context.Context, decisionID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, clearTagsForDecision, decisionID)
+	return err
+}
+
 const createTag = `-- name: CreateTag :one
 
 INSERT INTO tags (user_id, name, color_hex)

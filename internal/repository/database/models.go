@@ -34,6 +34,7 @@ type Decision struct {
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
 	DeletedAt           pgtype.Timestamptz `json:"deleted_at"`
+	IdempotencyKey      pgtype.Text        `json:"idempotency_key"`
 }
 
 type DecisionOutcome struct {
