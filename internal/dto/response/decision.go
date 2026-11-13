@@ -38,6 +38,11 @@ type TagResponse struct {
 	ColorHex string    `json:"color_hex"`
 }
 
+// DecisionResponse is one decision with its options, outcome, evaluation and
+// tags. UpdatedAt is the client's edit time (last-write-wins). ServerUpdatedAt
+// is the server's time of the last change to the decision or any of its child
+// rows: clients use the largest one they have seen as the next
+// GET /decisions?updated_since= value.
 type DecisionResponse struct {
 	ID                  uuid.UUID           `json:"id"`
 	UserID              uuid.UUID           `json:"user_id"`
@@ -48,6 +53,7 @@ type DecisionResponse struct {
 	ScheduledReviewDate *string             `json:"scheduled_review_date,omitempty"`
 	CreatedAt           time.Time           `json:"created_at"`
 	UpdatedAt           time.Time           `json:"updated_at"`
+	ServerUpdatedAt     time.Time           `json:"server_updated_at"`
 	DeletedAt           *time.Time          `json:"deleted_at,omitempty"`
 	Options             []OptionResponse    `json:"options"`
 	Outcome             *OutcomeResponse    `json:"outcome,omitempty"`

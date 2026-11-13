@@ -13,6 +13,7 @@ var (
 	ErrCannotDeleteChosenOption     = errors.New("cannot delete chosen option")
 	ErrAlreadyDeleted               = errors.New("decision already deleted")
 	ErrEvaluationRequiresCommitment = errors.New("cannot evaluate an uncommitted decision")
+	ErrInvalidChosenOption          = errors.New("chosen option is not one of this decision's options")
 )
 
 // ErrConflict is returned when an update/delete is attempted against an older version (LWW).
@@ -62,6 +63,7 @@ type Decision struct {
 	ScheduledReviewDate *time.Time       `json:"scheduled_review_date,omitempty"`
 	CreatedAt           time.Time        `json:"created_at"`
 	UpdatedAt           time.Time        `json:"updated_at"`
+	ServerUpdatedAt     time.Time        `json:"server_updated_at"`
 	DeletedAt           *time.Time       `json:"deleted_at,omitempty"`
 	IdempotencyKey      *string          `json:"idempotency_key,omitempty"`
 	Options             []Option         `json:"options"`
@@ -111,7 +113,7 @@ type DecisionRepository interface {
 	SoftDeleteWithLWW(ctx context.Context, id, userID uuid.UUID, localUpdatedAt *time.Time) error
 	SyncDecision(ctx context.Context, id, userID uuid.UUID, data SyncDecisionData) (Decision, error)
 
-	CreateOption(ctx context.Context, opt Option) (Option, error)
+	CreateOption(ctx context.Context, opt Option, userID uuid.UUID) (Option, error)
 	DeleteOption(ctx context.Context, optionID, decisionID, userID uuid.UUID) error
 	GetOptionByID(ctx context.Context, optionID, decisionID uuid.UUID) (Option, error)
 
@@ -134,7 +136,7 @@ type DecisionService interface {
 	DeleteOption(ctx context.Context, optionID, decisionID, userID uuid.UUID) error
 
 	CommitDecision(ctx context.Context, decisionID, userID, chosenOptionID uuid.UUID, commitmentNote *string, decidedAt *time.Time) (DecisionOutcome, error)
-	CreateEvaluation(ctx context.Context, decisionID, userID uuid.UUID, satisfactionAfter, confidenceAfter int, hindsightNotes string) (Evaluation, error)
+	CreateEvaluation(ctx context.Context, decisionID, userID uuid.UUID, satisfactionAfter, confidenceAfter int, hindsightNotes string, createdAt *time.Time) (Evaluation, error)
 
 	AttachTag(ctx context.Context, decisionID, tagID, userID uuid.UUID) error
 	DetachTag(ctx context.Context, decisionID, tagID, userID uuid.UUID) error

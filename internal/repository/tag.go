@@ -102,8 +102,23 @@ func (r *tagRepository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]do
 }
 
 func (r *tagRepository) DeleteByID(ctx context.Context, id, userID uuid.UUID) error {
-	return r.q.DeleteTagByID(ctx, database.DeleteTagByIDParams{
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	qtx := r.q.WithTx(tx)
+
+	// Deleting the tag removes it from its decisions, so mark them as changed
+	// for GET /decisions?updated_since=.
+	if err := qtx.TouchDecisionsWithTag(ctx, database.TouchDecisionsWithTagParams{TagID: id, UserID: userID}); err != nil {
+		return err
+	}
+	if err := qtx.DeleteTagByID(ctx, database.DeleteTagByIDParams{
 		ID:     id,
 		UserID: userID,
-	})
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

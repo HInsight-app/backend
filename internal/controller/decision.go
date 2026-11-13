@@ -265,6 +265,9 @@ func (ctrl *DecisionController) Sync(c echo.Context) error {
 		if errors.Is(err, domain.ErrDecisionNotFound) {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "Decision not found"})
 		}
+		if errors.Is(err, domain.ErrInvalidChosenOption) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
 		var conflictErr *domain.ErrConflict
 		if errors.As(err, &conflictErr) {
 			return c.JSON(http.StatusConflict, response.ConflictResponse{
@@ -386,7 +389,7 @@ func (ctrl *DecisionController) CreateEvaluation(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
-	eval, err := ctrl.service.CreateEvaluation(c.Request().Context(), decisionID, userID, req.SatisfactionAfter, req.ConfidenceAfter, req.HindsightNotes)
+	eval, err := ctrl.service.CreateEvaluation(c.Request().Context(), decisionID, userID, req.SatisfactionAfter, req.ConfidenceAfter, req.HindsightNotes, req.CreatedAt)
 	if err != nil {
 		if errors.Is(err, domain.ErrEvaluationRequiresCommitment) {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -514,6 +517,7 @@ func toDecisionResponse(d domain.Decision) response.DecisionResponse {
 		ScheduledReviewDate: reviewDateStr,
 		CreatedAt:           d.CreatedAt,
 		UpdatedAt:           d.UpdatedAt,
+		ServerUpdatedAt:     d.ServerUpdatedAt,
 		DeletedAt:           d.DeletedAt,
 		Options:             options,
 		Outcome:             toOutcomeResponse(d.Outcome),

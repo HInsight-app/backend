@@ -165,6 +165,7 @@ func (r *decisionRepository) Create(ctx context.Context, d domain.Decision, init
 		ScheduledReviewDate: rDate,
 		CreatedAt:           createdRow.CreatedAt.Time,
 		UpdatedAt:           createdRow.UpdatedAt.Time,
+		ServerUpdatedAt:     createdRow.ServerUpdatedAt.Time,
 		Options:             createdOptions,
 		Tags:                createdTags,
 	}, nil
@@ -186,7 +187,7 @@ func (r *decisionRepository) GetByID(ctx context.Context, id, userID uuid.UUID) 
 		return domain.Decision{}, domain.ErrDecisionNotFound
 	}
 
-	return r.populateRelations(ctx, row.ID, row.UserID, row.Title, row.Context, row.ConfidenceBefore, row.ScheduledReviewDate, row.CreatedAt, row.UpdatedAt, row.DeletedAt)
+	return r.populateRelations(ctx, row)
 }
 
 func (r *decisionRepository) GetByIdempotencyKey(ctx context.Context, userID uuid.UUID, key string) (domain.Decision, error) {
@@ -201,7 +202,7 @@ func (r *decisionRepository) GetByIdempotencyKey(ctx context.Context, userID uui
 		return domain.Decision{}, err
 	}
 
-	return r.populateRelations(ctx, row.ID, row.UserID, row.Title, row.Context, row.ConfidenceBefore, row.ScheduledReviewDate, row.CreatedAt, row.UpdatedAt, row.DeletedAt)
+	return r.populateRelations(ctx, row)
 }
 
 func (r *decisionRepository) GetActiveByUserID(ctx context.Context, userID uuid.UUID) ([]domain.Decision, error) {
@@ -212,7 +213,7 @@ func (r *decisionRepository) GetActiveByUserID(ctx context.Context, userID uuid.
 
 	decisions := make([]domain.Decision, 0, len(rows))
 	for _, row := range rows {
-		d, err := r.populateRelations(ctx, row.ID, row.UserID, row.Title, row.Context, row.ConfidenceBefore, row.ScheduledReviewDate, row.CreatedAt, row.UpdatedAt, pgtype.Timestamptz{Valid: false})
+		d, err := r.populateRelations(ctx, row)
 		if err != nil {
 			return nil, err
 		}
@@ -223,8 +224,8 @@ func (r *decisionRepository) GetActiveByUserID(ctx context.Context, userID uuid.
 
 func (r *decisionRepository) ListUpdatedSince(ctx context.Context, userID uuid.UUID, updatedSince time.Time) ([]domain.Decision, error) {
 	rows, err := r.q.ListDecisionsUpdatedSince(ctx, database.ListDecisionsUpdatedSinceParams{
-		UserID:    userID,
-		UpdatedAt: pgtype.Timestamptz{Time: updatedSince, Valid: true},
+		UserID:          userID,
+		ServerUpdatedAt: pgtype.Timestamptz{Time: updatedSince, Valid: true},
 	})
 	if err != nil {
 		return nil, err
@@ -232,7 +233,7 @@ func (r *decisionRepository) ListUpdatedSince(ctx context.Context, userID uuid.U
 
 	decisions := make([]domain.Decision, 0, len(rows))
 	for _, row := range rows {
-		d, err := r.populateRelations(ctx, row.ID, row.UserID, row.Title, row.Context, row.ConfidenceBefore, row.ScheduledReviewDate, row.CreatedAt, row.UpdatedAt, row.DeletedAt)
+		d, err := r.populateRelations(ctx, row)
 		if err != nil {
 			return nil, err
 		}
@@ -273,7 +274,7 @@ func (r *decisionRepository) UpdateWithLWW(ctx context.Context, d domain.Decisio
 				}
 				return domain.Decision{}, getErr
 			}
-			serverDecision, popErr := r.populateRelations(ctx, rawRow.ID, rawRow.UserID, rawRow.Title, rawRow.Context, rawRow.ConfidenceBefore, rawRow.ScheduledReviewDate, rawRow.CreatedAt, rawRow.UpdatedAt, rawRow.DeletedAt)
+			serverDecision, popErr := r.populateRelations(ctx, rawRow)
 			if popErr != nil {
 				return domain.Decision{}, popErr
 			}
@@ -282,7 +283,7 @@ func (r *decisionRepository) UpdateWithLWW(ctx context.Context, d domain.Decisio
 		return domain.Decision{}, err
 	}
 
-	return r.populateRelations(ctx, updatedRow.ID, updatedRow.UserID, updatedRow.Title, updatedRow.Context, updatedRow.ConfidenceBefore, updatedRow.ScheduledReviewDate, updatedRow.CreatedAt, updatedRow.UpdatedAt, pgtype.Timestamptz{Valid: false})
+	return r.populateRelations(ctx, updatedRow)
 }
 
 func (r *decisionRepository) SoftDeleteWithLWW(ctx context.Context, id, userID uuid.UUID, localUpdatedAt *time.Time) error {
@@ -311,7 +312,7 @@ func (r *decisionRepository) SoftDeleteWithLWW(ctx context.Context, id, userID u
 		if rawRow.DeletedAt.Valid {
 			return nil
 		}
-		serverDecision, popErr := r.populateRelations(ctx, rawRow.ID, rawRow.UserID, rawRow.Title, rawRow.Context, rawRow.ConfidenceBefore, rawRow.ScheduledReviewDate, rawRow.CreatedAt, rawRow.UpdatedAt, rawRow.DeletedAt)
+		serverDecision, popErr := r.populateRelations(ctx, rawRow)
 		if popErr != nil {
 			return popErr
 		}
@@ -321,7 +322,7 @@ func (r *decisionRepository) SoftDeleteWithLWW(ctx context.Context, id, userID u
 	return nil
 }
 
-func (r *decisionRepository) CreateOption(ctx context.Context, opt domain.Option) (domain.Option, error) {
+func (r *decisionRepository) CreateOption(ctx context.Context, opt domain.Option, userID uuid.UUID) (domain.Option, error) {
 	var prosText pgtype.Text
 	if opt.Pros != nil {
 		prosText = pgtype.Text{String: *opt.Pros, Valid: true}
@@ -331,11 +332,19 @@ func (r *decisionRepository) CreateOption(ctx context.Context, opt domain.Option
 		consText = pgtype.Text{String: *opt.Cons, Valid: true}
 	}
 
-	row, err := r.q.CreateOption(ctx, database.CreateOptionParams{
-		DecisionID: opt.DecisionID,
-		Title:      opt.Title,
-		Pros:       prosText,
-		Cons:       consText,
+	var row database.Option
+	err := r.inTx(ctx, func(q *database.Queries) error {
+		var err error
+		row, err = q.CreateOption(ctx, database.CreateOptionParams{
+			DecisionID: opt.DecisionID,
+			Title:      opt.Title,
+			Pros:       prosText,
+			Cons:       consText,
+		})
+		if err != nil {
+			return err
+		}
+		return q.TouchDecision(ctx, database.TouchDecisionParams{ID: opt.DecisionID, UserID: userID})
 	})
 	if err != nil {
 		return domain.Option{}, err
@@ -371,9 +380,14 @@ func (r *decisionRepository) DeleteOption(ctx context.Context, optionID, decisio
 		return domain.ErrCannotDeleteChosenOption
 	}
 
-	return r.q.DeleteOptionByID(ctx, database.DeleteOptionByIDParams{
-		ID:         optionID,
-		DecisionID: decisionID,
+	return r.inTx(ctx, func(q *database.Queries) error {
+		if err := q.DeleteOptionByID(ctx, database.DeleteOptionByIDParams{
+			ID:         optionID,
+			DecisionID: decisionID,
+		}); err != nil {
+			return err
+		}
+		return q.TouchDecision(ctx, database.TouchDecisionParams{ID: decisionID, UserID: userID})
 	})
 }
 
@@ -426,11 +440,19 @@ func (r *decisionRepository) UpsertOutcome(ctx context.Context, outcome domain.D
 		decidedAtTS = pgtype.Timestamptz{Time: outcome.DecidedAt, Valid: true}
 	}
 
-	row, err := r.q.UpsertDecisionOutcomeWithTimestamp(ctx, database.UpsertDecisionOutcomeWithTimestampParams{
-		DecisionID:     outcome.DecisionID,
-		ChosenOptionID: outcome.ChosenOptionID,
-		CommitmentNote: note,
-		DecidedAt:      decidedAtTS,
+	var row database.DecisionOutcome
+	err := r.inTx(ctx, func(q *database.Queries) error {
+		var err error
+		row, err = q.UpsertDecisionOutcomeWithTimestamp(ctx, database.UpsertDecisionOutcomeWithTimestampParams{
+			DecisionID:     outcome.DecisionID,
+			ChosenOptionID: outcome.ChosenOptionID,
+			CommitmentNote: note,
+			DecidedAt:      decidedAtTS,
+		})
+		if err != nil {
+			return err
+		}
+		return q.TouchDecision(ctx, database.TouchDecisionParams{ID: outcome.DecisionID, UserID: userID})
 	})
 	if err != nil {
 		return domain.DecisionOutcome{}, err
@@ -454,11 +476,25 @@ func (r *decisionRepository) UpsertEvaluation(ctx context.Context, eval domain.E
 		return domain.Evaluation{}, err
 	}
 
-	row, err := r.q.UpsertEvaluation(ctx, database.UpsertEvaluationParams{
-		DecisionID:        eval.DecisionID,
-		SatisfactionAfter: pgtype.Int4{Int32: int32(eval.SatisfactionAfter), Valid: true},
-		ConfidenceAfter:   pgtype.Int4{Int32: int32(eval.ConfidenceAfter), Valid: true},
-		HindsightNotes:    pgtype.Text{String: eval.HindsightNotes, Valid: true},
+	var createdAtTS pgtype.Timestamptz
+	if !eval.CreatedAt.IsZero() {
+		createdAtTS = pgtype.Timestamptz{Time: eval.CreatedAt, Valid: true}
+	}
+
+	var row database.Evaluation
+	err := r.inTx(ctx, func(q *database.Queries) error {
+		var err error
+		row, err = q.UpsertEvaluation(ctx, database.UpsertEvaluationParams{
+			DecisionID:        eval.DecisionID,
+			SatisfactionAfter: pgtype.Int4{Int32: int32(eval.SatisfactionAfter), Valid: true},
+			ConfidenceAfter:   pgtype.Int4{Int32: int32(eval.ConfidenceAfter), Valid: true},
+			HindsightNotes:    pgtype.Text{String: eval.HindsightNotes, Valid: true},
+			CreatedAt:         createdAtTS,
+		})
+		if err != nil {
+			return err
+		}
+		return q.TouchDecision(ctx, database.TouchDecisionParams{ID: eval.DecisionID, UserID: userID})
 	})
 	if err != nil {
 		return domain.Evaluation{}, err
@@ -487,20 +523,45 @@ func (r *decisionRepository) AddTag(ctx context.Context, decisionID, tagID, user
 		return err
 	}
 
-	_, err := r.q.AddTagToDecision(ctx, database.AddTagToDecisionParams{
-		DecisionID: decisionID,
-		TagID:      tagID,
-		UserID:     userID,
+	return r.inTx(ctx, func(q *database.Queries) error {
+		if _, err := q.AddTagToDecision(ctx, database.AddTagToDecisionParams{
+			DecisionID: decisionID,
+			TagID:      tagID,
+			UserID:     userID,
+		}); err != nil {
+			return err
+		}
+		return q.TouchDecision(ctx, database.TouchDecisionParams{ID: decisionID, UserID: userID})
 	})
-	return err
 }
 
 func (r *decisionRepository) RemoveTag(ctx context.Context, decisionID, tagID, userID uuid.UUID) error {
-	return r.q.RemoveTagFromDecision(ctx, database.RemoveTagFromDecisionParams{
-		DecisionID: decisionID,
-		TagID:      tagID,
-		UserID:     userID,
+	return r.inTx(ctx, func(q *database.Queries) error {
+		if err := q.RemoveTagFromDecision(ctx, database.RemoveTagFromDecisionParams{
+			DecisionID: decisionID,
+			TagID:      tagID,
+			UserID:     userID,
+		}); err != nil {
+			return err
+		}
+		return q.TouchDecision(ctx, database.TouchDecisionParams{ID: decisionID, UserID: userID})
 	})
+}
+
+// inTx runs fn in one transaction, so a write to a child row (option,
+// outcome, evaluation, tag) and the decision's server_updated_at bump land
+// together. Without the bump, GET /decisions?updated_since= misses the change.
+func (r *decisionRepository) inTx(ctx context.Context, fn func(q *database.Queries) error) error {
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if err := fn(r.q.WithTx(tx)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *decisionRepository) SyncDecision(ctx context.Context, id, userID uuid.UUID, data domain.SyncDecisionData) (domain.Decision, error) {
@@ -523,7 +584,7 @@ func (r *decisionRepository) SyncDecision(ctx context.Context, id, userID uuid.U
 
 	// Conflict check: if deleted or server has newer updated_at
 	if rawRow.DeletedAt.Valid || rawRow.UpdatedAt.Time.After(data.LocalUpdatedAt) {
-		serverDec, popErr := r.populateRelationsWithTx(ctx, qtx, rawRow.ID, rawRow.UserID, rawRow.Title, rawRow.Context, rawRow.ConfidenceBefore, rawRow.ScheduledReviewDate, rawRow.CreatedAt, rawRow.UpdatedAt, rawRow.DeletedAt)
+		serverDec, popErr := r.populateRelationsWithTx(ctx, qtx, rawRow)
 		if popErr != nil {
 			return domain.Decision{}, popErr
 		}
@@ -557,7 +618,42 @@ func (r *decisionRepository) SyncDecision(ctx context.Context, id, userID uuid.U
 		return domain.Decision{}, err
 	}
 
-	// Reconcile options
+	// Reconcile options. The order matters because of two constraints:
+	// UNIQUE(decision_id, title), and decision_outcomes referencing the
+	// chosen option.
+	//  1. Delete the options left out of the request first, so a new option
+	//     may reuse the title of one removed in the same sync. The currently
+	//     chosen option waits until the outcome has moved off it.
+	//  2. Update or create the options that were sent.
+	//  3. Upsert the outcome.
+	//  4. Delete the previously chosen option if it was left out and is no
+	//     longer chosen.
+	currentOpts, err := qtx.GetOptionsByDecisionID(ctx, id)
+	if err != nil {
+		return domain.Decision{}, err
+	}
+
+	var currentChosen uuid.UUID
+	if outcomeRow, err := qtx.GetDecisionOutcome(ctx, id); err == nil {
+		currentChosen = outcomeRow.ChosenOptionID
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return domain.Decision{}, err
+	}
+
+	sentIDs := make(map[uuid.UUID]bool)
+	for _, opt := range data.Options {
+		if opt.ID != nil && *opt.ID != uuid.Nil {
+			sentIDs[*opt.ID] = true
+		}
+	}
+	for _, co := range currentOpts {
+		if !sentIDs[co.ID] && co.ID != currentChosen {
+			if err := qtx.DeleteOptionByID(ctx, database.DeleteOptionByIDParams{ID: co.ID, DecisionID: id}); err != nil {
+				return domain.Decision{}, err
+			}
+		}
+	}
+
 	clientKeyMap := make(map[string]uuid.UUID)
 	keptOptionIDs := make(map[uuid.UUID]bool)
 
@@ -571,8 +667,8 @@ func (r *decisionRepository) SyncDecision(ctx context.Context, id, userID uuid.U
 			consText = pgtype.Text{String: *opt.Cons, Valid: true}
 		}
 
+		var savedID uuid.UUID
 		if opt.ID != nil && *opt.ID != uuid.Nil {
-			// Update existing option
 			updatedOpt, err := qtx.UpdateOption(ctx, database.UpdateOptionParams{
 				ID:         *opt.ID,
 				DecisionID: id,
@@ -580,15 +676,15 @@ func (r *decisionRepository) SyncDecision(ctx context.Context, id, userID uuid.U
 				Pros:       prosText,
 				Cons:       consText,
 			})
-			if err != nil {
+			if err == nil {
+				savedID = updatedOpt.ID
+			} else if !errors.Is(err, pgx.ErrNoRows) {
 				return domain.Decision{}, err
 			}
-			keptOptionIDs[updatedOpt.ID] = true
-			if opt.ClientKey != nil && *opt.ClientKey != "" {
-				clientKeyMap[*opt.ClientKey] = updatedOpt.ID
-			}
-		} else {
-			// Create new option
+			// ErrNoRows: this decision has no option with that id (e.g. it was
+			// deleted by another device), so it is created again below.
+		}
+		if savedID == uuid.Nil {
 			createdOpt, err := qtx.CreateOption(ctx, database.CreateOptionParams{
 				DecisionID: id,
 				Title:      opt.Title,
@@ -598,56 +694,54 @@ func (r *decisionRepository) SyncDecision(ctx context.Context, id, userID uuid.U
 			if err != nil {
 				return domain.Decision{}, err
 			}
-			keptOptionIDs[createdOpt.ID] = true
-			if opt.ClientKey != nil && *opt.ClientKey != "" {
-				clientKeyMap[*opt.ClientKey] = createdOpt.ID
-			}
+			savedID = createdOpt.ID
+		}
+
+		keptOptionIDs[savedID] = true
+		if opt.ClientKey != nil && *opt.ClientKey != "" {
+			clientKeyMap[*opt.ClientKey] = savedID
 		}
 	}
 
-	// Delete options that were omitted in this sync
-	currentOpts, err := qtx.GetOptionsByDecisionID(ctx, id)
-	if err != nil {
-		return domain.Decision{}, err
-	}
-	for _, co := range currentOpts {
-		if !keptOptionIDs[co.ID] {
-			if err := qtx.DeleteOptionByID(ctx, database.DeleteOptionByIDParams{ID: co.ID, DecisionID: id}); err != nil {
-				return domain.Decision{}, err
-			}
-		}
-	}
-
-	// Reconcile outcome if provided
+	// Reconcile outcome if provided. Committing is final, so a request
+	// without an outcome leaves the server's outcome as it is.
+	finalChosen := currentChosen
 	if data.Outcome != nil {
 		var chosenID uuid.UUID
-		if data.Outcome.ChosenOptionID != nil && *data.Outcome.ChosenOptionID != uuid.Nil {
+		if data.Outcome.ChosenOptionID != nil && keptOptionIDs[*data.Outcome.ChosenOptionID] {
 			chosenID = *data.Outcome.ChosenOptionID
 		} else if data.Outcome.ChosenOptionKey != nil && *data.Outcome.ChosenOptionKey != "" {
-			if resolvedID, ok := clientKeyMap[*data.Outcome.ChosenOptionKey]; ok {
-				chosenID = resolvedID
-			}
+			chosenID = clientKeyMap[*data.Outcome.ChosenOptionKey]
+		}
+		if chosenID == uuid.Nil {
+			// Saving the rest without the commitment would silently lose it.
+			return domain.Decision{}, domain.ErrInvalidChosenOption
 		}
 
-		if chosenID != uuid.Nil {
-			var note pgtype.Text
-			if data.Outcome.CommitmentNote != nil {
-				note = pgtype.Text{String: *data.Outcome.CommitmentNote, Valid: true}
-			}
-			var decidedAtTS pgtype.Timestamptz
-			if data.Outcome.DecidedAt != nil && !data.Outcome.DecidedAt.IsZero() {
-				decidedAtTS = pgtype.Timestamptz{Time: *data.Outcome.DecidedAt, Valid: true}
-			}
+		var note pgtype.Text
+		if data.Outcome.CommitmentNote != nil {
+			note = pgtype.Text{String: *data.Outcome.CommitmentNote, Valid: true}
+		}
+		var decidedAtTS pgtype.Timestamptz
+		if data.Outcome.DecidedAt != nil && !data.Outcome.DecidedAt.IsZero() {
+			decidedAtTS = pgtype.Timestamptz{Time: *data.Outcome.DecidedAt, Valid: true}
+		}
 
-			_, err = qtx.UpsertDecisionOutcomeWithTimestamp(ctx, database.UpsertDecisionOutcomeWithTimestampParams{
-				DecisionID:     id,
-				ChosenOptionID: chosenID,
-				CommitmentNote: note,
-				DecidedAt:      decidedAtTS,
-			})
-			if err != nil {
-				return domain.Decision{}, err
-			}
+		_, err = qtx.UpsertDecisionOutcomeWithTimestamp(ctx, database.UpsertDecisionOutcomeWithTimestampParams{
+			DecisionID:     id,
+			ChosenOptionID: chosenID,
+			CommitmentNote: note,
+			DecidedAt:      decidedAtTS,
+		})
+		if err != nil {
+			return domain.Decision{}, err
+		}
+		finalChosen = chosenID
+	}
+
+	if currentChosen != uuid.Nil && !keptOptionIDs[currentChosen] && finalChosen != currentChosen {
+		if err := qtx.DeleteOptionByID(ctx, database.DeleteOptionByIDParams{ID: currentChosen, DecisionID: id}); err != nil {
+			return domain.Decision{}, err
 		}
 	}
 
@@ -674,28 +768,12 @@ func (r *decisionRepository) SyncDecision(ctx context.Context, id, userID uuid.U
 }
 
 // populateRelations assembles nested options, outcome, evaluation, and tags for a decision.
-func (r *decisionRepository) populateRelations(
-	ctx context.Context,
-	id, userID uuid.UUID,
-	title string,
-	ctxText pgtype.Text,
-	conf pgtype.Int4,
-	rDate pgtype.Date,
-	cAt, uAt, dAt pgtype.Timestamptz,
-) (domain.Decision, error) {
-	return r.populateRelationsWithTx(ctx, r.q, id, userID, title, ctxText, conf, rDate, cAt, uAt, dAt)
+func (r *decisionRepository) populateRelations(ctx context.Context, row database.Decision) (domain.Decision, error) {
+	return r.populateRelationsWithTx(ctx, r.q, row)
 }
 
-func (r *decisionRepository) populateRelationsWithTx(
-	ctx context.Context,
-	q *database.Queries,
-	id, userID uuid.UUID,
-	title string,
-	ctxText pgtype.Text,
-	conf pgtype.Int4,
-	rDate pgtype.Date,
-	cAt, uAt, dAt pgtype.Timestamptz,
-) (domain.Decision, error) {
+func (r *decisionRepository) populateRelationsWithTx(ctx context.Context, q *database.Queries, row database.Decision) (domain.Decision, error) {
+	id := row.ID
 	optRows, err := q.GetOptionsByDecisionID(ctx, id)
 	if err != nil {
 		return domain.Decision{}, err
@@ -762,34 +840,35 @@ func (r *decisionRepository) populateRelationsWithTx(
 	}
 
 	var ctxStr *string
-	if ctxText.Valid {
-		ctxStr = &ctxText.String
+	if row.Context.Valid {
+		ctxStr = &row.Context.String
 	}
 	var confInt *int
-	if conf.Valid {
-		v := int(conf.Int32)
+	if row.ConfidenceBefore.Valid {
+		v := int(row.ConfidenceBefore.Int32)
 		confInt = &v
 	}
 	var reviewDateTime *time.Time
-	if rDate.Valid {
-		t := rDate.Time
+	if row.ScheduledReviewDate.Valid {
+		t := row.ScheduledReviewDate.Time
 		reviewDateTime = &t
 	}
 	var delTime *time.Time
-	if dAt.Valid {
-		t := dAt.Time
+	if row.DeletedAt.Valid {
+		t := row.DeletedAt.Time
 		delTime = &t
 	}
 
 	return domain.Decision{
-		ID:                  id,
-		UserID:              userID,
-		Title:               title,
+		ID:                  row.ID,
+		UserID:              row.UserID,
+		Title:               row.Title,
 		Context:             ctxStr,
 		ConfidenceBefore:    confInt,
 		ScheduledReviewDate: reviewDateTime,
-		CreatedAt:           cAt.Time,
-		UpdatedAt:           uAt.Time,
+		CreatedAt:           row.CreatedAt.Time,
+		UpdatedAt:           row.UpdatedAt.Time,
+		ServerUpdatedAt:     row.ServerUpdatedAt.Time,
 		DeletedAt:           delTime,
 		Options:             options,
 		Outcome:             outcome,

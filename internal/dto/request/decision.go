@@ -44,6 +44,8 @@ type CreateEvaluationRequest struct {
 	SatisfactionAfter int    `json:"satisfaction_after" validate:"required,min=1,max=100"`
 	ConfidenceAfter   int    `json:"confidence_after" validate:"required,min=1,max=100"`
 	HindsightNotes    string `json:"hindsight_notes" validate:"required"`
+	// CreatedAt is when the student wrote it (it may sync later). Optional.
+	CreatedAt *time.Time `json:"created_at"`
 }
 
 type AttachTagRequest struct {

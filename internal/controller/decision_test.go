@@ -27,7 +27,7 @@ type mockDecisionService struct {
 	addOptionFunc        func(ctx context.Context, decisionID, userID uuid.UUID, title string, pros, cons *string) (domain.Option, error)
 	deleteOptionFunc     func(ctx context.Context, optionID, decisionID, userID uuid.UUID) error
 	commitDecisionFunc   func(ctx context.Context, decisionID, userID, chosenOptionID uuid.UUID, commitmentNote *string, decidedAt *time.Time) (domain.DecisionOutcome, error)
-	createEvaluationFunc func(ctx context.Context, decisionID, userID uuid.UUID, satisfactionAfter, confidenceAfter int, hindsightNotes string) (domain.Evaluation, error)
+	createEvaluationFunc func(ctx context.Context, decisionID, userID uuid.UUID, satisfactionAfter, confidenceAfter int, hindsightNotes string, createdAt *time.Time) (domain.Evaluation, error)
 	attachTagFunc        func(ctx context.Context, decisionID, tagID, userID uuid.UUID) error
 	detachTagFunc        func(ctx context.Context, decisionID, tagID, userID uuid.UUID) error
 	syncDecisionFunc     func(ctx context.Context, id, userID uuid.UUID, data domain.SyncDecisionData) (domain.Decision, error)
@@ -89,9 +89,9 @@ func (m *mockDecisionService) CommitDecision(ctx context.Context, decisionID, us
 	return domain.DecisionOutcome{}, nil
 }
 
-func (m *mockDecisionService) CreateEvaluation(ctx context.Context, decisionID, userID uuid.UUID, satisfactionAfter, confidenceAfter int, hindsightNotes string) (domain.Evaluation, error) {
+func (m *mockDecisionService) CreateEvaluation(ctx context.Context, decisionID, userID uuid.UUID, satisfactionAfter, confidenceAfter int, hindsightNotes string, createdAt *time.Time) (domain.Evaluation, error) {
 	if m.createEvaluationFunc != nil {
-		return m.createEvaluationFunc(ctx, decisionID, userID, satisfactionAfter, confidenceAfter, hindsightNotes)
+		return m.createEvaluationFunc(ctx, decisionID, userID, satisfactionAfter, confidenceAfter, hindsightNotes, createdAt)
 	}
 	return domain.Evaluation{}, nil
 }
@@ -300,7 +300,7 @@ func TestDecisionController_CreateEvaluation_RequiresCommitment(t *testing.T) {
 	decisionID := uuid.New()
 
 	svc := &mockDecisionService{
-		createEvaluationFunc: func(ctx context.Context, decID, uid uuid.UUID, sat, conf int, notes string) (domain.Evaluation, error) {
+		createEvaluationFunc: func(ctx context.Context, decID, uid uuid.UUID, sat, conf int, notes string, createdAt *time.Time) (domain.Evaluation, error) {
 			return domain.Evaluation{}, domain.ErrEvaluationRequiresCommitment
 		},
 	}
@@ -358,5 +358,109 @@ func TestDecisionController_ComputedStatusInResponse(t *testing.T) {
 
 	if res.Status != "decided" {
 		t.Fatalf("expected status 'decided', got '%s'", res.Status)
+	}
+}
+
+func TestDecisionController_Sync_InvalidChosenOption_ReturnsBadRequest(t *testing.T) {
+	userID := uuid.New()
+	decisionID := uuid.New()
+
+	svc := &mockDecisionService{
+		syncDecisionFunc: func(ctx context.Context, id, uid uuid.UUID, data domain.SyncDecisionData) (domain.Decision, error) {
+			return domain.Decision{}, domain.ErrInvalidChosenOption
+		},
+	}
+	e, g := setupEchoWithAuth(userID)
+	controller.NewDecisionController(g, svc)
+
+	payload := `{
+		"title": "Synced Decision",
+		"local_updated_at": "2026-11-13T12:00:00Z",
+		"options": [{"title": "Option 1", "client_key": "local-opt-1"}],
+		"outcome": {"chosen_option_key": "no-such-key"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/decisions/"+decisionID.String()+"/sync", bytes.NewBufferString(payload))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDecisionController_PullIncludesServerUpdatedAtAndDeletedAt(t *testing.T) {
+	userID := uuid.New()
+	serverUpdatedAt := time.Date(2026, 11, 13, 14, 0, 0, 0, time.UTC)
+	deletedAt := time.Date(2026, 11, 13, 13, 0, 0, 0, time.UTC)
+	var gotSince *time.Time
+
+	svc := &mockDecisionService{
+		listDecisionsFunc: func(ctx context.Context, uid uuid.UUID, updatedSince *time.Time) ([]domain.Decision, error) {
+			gotSince = updatedSince
+			return []domain.Decision{{
+				ID:              uuid.New(),
+				UserID:          uid,
+				Title:           "Deleted elsewhere",
+				UpdatedAt:       deletedAt,
+				ServerUpdatedAt: serverUpdatedAt,
+				DeletedAt:       &deletedAt,
+			}}, nil
+		},
+	}
+	e, g := setupEchoWithAuth(userID)
+	controller.NewDecisionController(g, svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/decisions?updated_since=2026-11-13T12:00:00.000Z", nil)
+	rec := httptest.NewRecorder()
+
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotSince == nil || !gotSince.Equal(time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("expected updated_since 2026-11-13T12:00:00Z (with milliseconds accepted), got %v", gotSince)
+	}
+
+	var res []response.DecisionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(res) != 1 || !res[0].ServerUpdatedAt.Equal(serverUpdatedAt) {
+		t.Fatalf("expected server_updated_at %v, got %+v", serverUpdatedAt, res)
+	}
+	if res[0].DeletedAt == nil || !res[0].DeletedAt.Equal(deletedAt) {
+		t.Fatalf("expected deleted_at %v, got %v", deletedAt, res[0].DeletedAt)
+	}
+}
+
+func TestDecisionController_CreateEvaluation_PassesClientCreatedAt(t *testing.T) {
+	userID := uuid.New()
+	decisionID := uuid.New()
+	var gotCreatedAt *time.Time
+
+	svc := &mockDecisionService{
+		createEvaluationFunc: func(ctx context.Context, decID, uid uuid.UUID, sat, conf int, notes string, createdAt *time.Time) (domain.Evaluation, error) {
+			gotCreatedAt = createdAt
+			return domain.Evaluation{ID: uuid.New(), DecisionID: decID}, nil
+		},
+	}
+	e, g := setupEchoWithAuth(userID)
+	controller.NewDecisionController(g, svc)
+
+	payload := `{"satisfaction_after": 80, "confidence_after": 75, "hindsight_notes": "Valid notes", "created_at": "2026-11-10T08:30:00.000Z"}`
+	req := httptest.NewRequest(http.MethodPost, "/decisions/"+decisionID.String()+"/evaluations", bytes.NewBufferString(payload))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotCreatedAt == nil || !gotCreatedAt.Equal(time.Date(2026, 11, 10, 8, 30, 0, 0, time.UTC)) {
+		t.Fatalf("expected created_at 2026-11-10T08:30:00Z, got %v", gotCreatedAt)
 	}
 }

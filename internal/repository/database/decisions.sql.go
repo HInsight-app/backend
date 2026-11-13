@@ -25,7 +25,7 @@ VALUES (
     COALESCE($6::timestamptz, NOW()),
     $7
 )
-RETURNING id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
+RETURNING id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key, server_updated_at
 `
 
 type CreateDecisionParams struct {
@@ -63,6 +63,7 @@ func (q *Queries) CreateDecision(ctx context.Context, arg CreateDecisionParams) 
 		&i.UpdatedAt,
 		&i.DeletedAt,
 		&i.IdempotencyKey,
+		&i.ServerUpdatedAt,
 	)
 	return i, err
 }
@@ -155,7 +156,7 @@ func (q *Queries) DeleteOptionByID(ctx context.Context, arg DeleteOptionByIDPara
 }
 
 const getActiveDecisionsByUserID = `-- name: GetActiveDecisionsByUserID :many
-SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
+SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key, server_updated_at
 FROM decisions
 WHERE user_id = $1 AND deleted_at IS NULL
 ORDER BY created_at DESC
@@ -181,6 +182,7 @@ func (q *Queries) GetActiveDecisionsByUserID(ctx context.Context, userID uuid.UU
 			&i.UpdatedAt,
 			&i.DeletedAt,
 			&i.IdempotencyKey,
+			&i.ServerUpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -193,7 +195,7 @@ func (q *Queries) GetActiveDecisionsByUserID(ctx context.Context, userID uuid.UU
 }
 
 const getDecisionByID = `-- name: GetDecisionByID :one
-SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
+SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key, server_updated_at
 FROM decisions
 WHERE id = $1 AND user_id = $2
 `
@@ -217,12 +219,13 @@ func (q *Queries) GetDecisionByID(ctx context.Context, arg GetDecisionByIDParams
 		&i.UpdatedAt,
 		&i.DeletedAt,
 		&i.IdempotencyKey,
+		&i.ServerUpdatedAt,
 	)
 	return i, err
 }
 
 const getDecisionByIdempotencyKey = `-- name: GetDecisionByIdempotencyKey :one
-SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
+SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key, server_updated_at
 FROM decisions
 WHERE user_id = $1 AND idempotency_key = $2
 LIMIT 1
@@ -247,6 +250,7 @@ func (q *Queries) GetDecisionByIdempotencyKey(ctx context.Context, arg GetDecisi
 		&i.UpdatedAt,
 		&i.DeletedAt,
 		&i.IdempotencyKey,
+		&i.ServerUpdatedAt,
 	)
 	return i, err
 }
@@ -349,19 +353,19 @@ func (q *Queries) GetOptionsByDecisionID(ctx context.Context, decisionID uuid.UU
 }
 
 const listDecisionsUpdatedSince = `-- name: ListDecisionsUpdatedSince :many
-SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
+SELECT id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key, server_updated_at
 FROM decisions
-WHERE user_id = $1 AND updated_at > $2
-ORDER BY updated_at ASC
+WHERE user_id = $1 AND server_updated_at >= $2
+ORDER BY server_updated_at ASC
 `
 
 type ListDecisionsUpdatedSinceParams struct {
-	UserID    uuid.UUID          `json:"user_id"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	UserID          uuid.UUID          `json:"user_id"`
+	ServerUpdatedAt pgtype.Timestamptz `json:"server_updated_at"`
 }
 
 func (q *Queries) ListDecisionsUpdatedSince(ctx context.Context, arg ListDecisionsUpdatedSinceParams) ([]Decision, error) {
-	rows, err := q.db.Query(ctx, listDecisionsUpdatedSince, arg.UserID, arg.UpdatedAt)
+	rows, err := q.db.Query(ctx, listDecisionsUpdatedSince, arg.UserID, arg.ServerUpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -380,6 +384,7 @@ func (q *Queries) ListDecisionsUpdatedSince(ctx context.Context, arg ListDecisio
 			&i.UpdatedAt,
 			&i.DeletedAt,
 			&i.IdempotencyKey,
+			&i.ServerUpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -394,7 +399,8 @@ func (q *Queries) ListDecisionsUpdatedSince(ctx context.Context, arg ListDecisio
 const softDeleteDecision = `-- name: SoftDeleteDecision :exec
 UPDATE decisions
 SET deleted_at = NOW(),
-    updated_at = NOW()
+    updated_at = NOW(),
+    server_updated_at = clock_timestamp()
 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
 `
 
@@ -411,7 +417,8 @@ func (q *Queries) SoftDeleteDecision(ctx context.Context, arg SoftDeleteDecision
 const softDeleteDecisionWithLWW = `-- name: SoftDeleteDecisionWithLWW :execrows
 UPDATE decisions
 SET deleted_at = COALESCE($3::timestamptz, NOW()),
-    updated_at = COALESCE($3::timestamptz, NOW())
+    updated_at = COALESCE($3::timestamptz, NOW()),
+    server_updated_at = clock_timestamp()
 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL AND ($3::timestamptz IS NULL OR updated_at <= $3)
 `
 
@@ -429,15 +436,53 @@ func (q *Queries) SoftDeleteDecisionWithLWW(ctx context.Context, arg SoftDeleteD
 	return result.RowsAffected(), nil
 }
 
+const touchDecision = `-- name: TouchDecision :exec
+UPDATE decisions
+SET server_updated_at = clock_timestamp()
+WHERE id = $1 AND user_id = $2
+`
+
+type TouchDecisionParams struct {
+	ID     uuid.UUID `json:"id"`
+	UserID uuid.UUID `json:"user_id"`
+}
+
+// Marks a decision as changed for sync pull after a write to one of its child
+// rows (options, outcome, evaluation, tags).
+func (q *Queries) TouchDecision(ctx context.Context, arg TouchDecisionParams) error {
+	_, err := q.db.Exec(ctx, touchDecision, arg.ID, arg.UserID)
+	return err
+}
+
+const touchDecisionsWithTag = `-- name: TouchDecisionsWithTag :exec
+UPDATE decisions
+SET server_updated_at = clock_timestamp()
+WHERE user_id = $2
+  AND id IN (SELECT decision_id FROM decision_tags WHERE tag_id = $1)
+`
+
+type TouchDecisionsWithTagParams struct {
+	TagID  uuid.UUID `json:"tag_id"`
+	UserID uuid.UUID `json:"user_id"`
+}
+
+// Marks every decision that uses a tag as changed, before the tag is deleted
+// (deleting it removes it from those decisions).
+func (q *Queries) TouchDecisionsWithTag(ctx context.Context, arg TouchDecisionsWithTagParams) error {
+	_, err := q.db.Exec(ctx, touchDecisionsWithTag, arg.TagID, arg.UserID)
+	return err
+}
+
 const updateDecision = `-- name: UpdateDecision :one
 UPDATE decisions
 SET title = $3,
     context = $4,
     confidence_before = $5,
     scheduled_review_date = $6,
-    updated_at = NOW()
+    updated_at = NOW(),
+    server_updated_at = clock_timestamp()
 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-RETURNING id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
+RETURNING id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key, server_updated_at
 `
 
 type UpdateDecisionParams struct {
@@ -470,6 +515,7 @@ func (q *Queries) UpdateDecision(ctx context.Context, arg UpdateDecisionParams) 
 		&i.UpdatedAt,
 		&i.DeletedAt,
 		&i.IdempotencyKey,
+		&i.ServerUpdatedAt,
 	)
 	return i, err
 }
@@ -480,9 +526,10 @@ SET title = $3,
     context = $4,
     confidence_before = $5,
     scheduled_review_date = $6,
-    updated_at = $7
+    updated_at = $7,
+    server_updated_at = clock_timestamp()
 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL AND updated_at <= $7
-RETURNING id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key
+RETURNING id, user_id, title, context, confidence_before, scheduled_review_date, created_at, updated_at, deleted_at, idempotency_key, server_updated_at
 `
 
 type UpdateDecisionWithLWWParams struct {
@@ -517,6 +564,7 @@ func (q *Queries) UpdateDecisionWithLWW(ctx context.Context, arg UpdateDecisionW
 		&i.UpdatedAt,
 		&i.DeletedAt,
 		&i.IdempotencyKey,
+		&i.ServerUpdatedAt,
 	)
 	return i, err
 }
@@ -625,8 +673,8 @@ func (q *Queries) UpsertDecisionOutcomeWithTimestamp(ctx context.Context, arg Up
 }
 
 const upsertEvaluation = `-- name: UpsertEvaluation :one
-INSERT INTO evaluations (decision_id, satisfaction_after, confidence_after, hindsight_notes)
-VALUES ($1, $2, $3, $4)
+INSERT INTO evaluations (decision_id, satisfaction_after, confidence_after, hindsight_notes, created_at)
+VALUES ($1, $2, $3, $4, COALESCE($5::timestamptz, NOW()))
 ON CONFLICT (decision_id) DO UPDATE
 SET satisfaction_after = EXCLUDED.satisfaction_after,
     confidence_after = EXCLUDED.confidence_after,
@@ -635,10 +683,11 @@ RETURNING id, decision_id, satisfaction_after, confidence_after, hindsight_notes
 `
 
 type UpsertEvaluationParams struct {
-	DecisionID        uuid.UUID   `json:"decision_id"`
-	SatisfactionAfter pgtype.Int4 `json:"satisfaction_after"`
-	ConfidenceAfter   pgtype.Int4 `json:"confidence_after"`
-	HindsightNotes    pgtype.Text `json:"hindsight_notes"`
+	DecisionID        uuid.UUID          `json:"decision_id"`
+	SatisfactionAfter pgtype.Int4        `json:"satisfaction_after"`
+	ConfidenceAfter   pgtype.Int4        `json:"confidence_after"`
+	HindsightNotes    pgtype.Text        `json:"hindsight_notes"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 }
 
 func (q *Queries) UpsertEvaluation(ctx context.Context, arg UpsertEvaluationParams) (Evaluation, error) {
@@ -647,6 +696,7 @@ func (q *Queries) UpsertEvaluation(ctx context.Context, arg UpsertEvaluationPara
 		arg.SatisfactionAfter,
 		arg.ConfidenceAfter,
 		arg.HindsightNotes,
+		arg.CreatedAt,
 	)
 	var i Evaluation
 	err := row.Scan(

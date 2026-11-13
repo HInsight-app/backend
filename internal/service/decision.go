@@ -69,7 +69,15 @@ func (s *decisionService) CreateDecision(
 		d.CreatedAt = *createdAt
 	}
 
-	return s.repo.Create(ctx, d, cleanOptions, initialTagIDs)
+	created, err := s.repo.Create(ctx, d, cleanOptions, initialTagIDs)
+	if err != nil && idempotencyKey != nil && *idempotencyKey != "" {
+		// Two requests with the same key at once: the other one inserted first
+		// and this insert hit the unique index. Return the first decision.
+		if existing, getErr := s.repo.GetByIdempotencyKey(ctx, userID, *idempotencyKey); getErr == nil {
+			return existing, nil
+		}
+	}
+	return created, err
 }
 
 func (s *decisionService) GetDecision(ctx context.Context, id, userID uuid.UUID) (domain.Decision, error) {
@@ -130,7 +138,7 @@ func (s *decisionService) AddOption(ctx context.Context, decisionID, userID uuid
 		Title:      cleanTitle,
 		Pros:       pros,
 		Cons:       cons,
-	})
+	}, userID)
 }
 
 func (s *decisionService) DeleteOption(ctx context.Context, optionID, decisionID, userID uuid.UUID) error {
@@ -162,6 +170,7 @@ func (s *decisionService) CreateEvaluation(
 	decisionID, userID uuid.UUID,
 	satisfactionAfter, confidenceAfter int,
 	hindsightNotes string,
+	createdAt *time.Time,
 ) (domain.Evaluation, error) {
 	cleanNotes := strings.TrimSpace(hindsightNotes)
 	if cleanNotes == "" {
@@ -181,6 +190,9 @@ func (s *decisionService) CreateEvaluation(
 		SatisfactionAfter: satisfactionAfter,
 		ConfidenceAfter:   confidenceAfter,
 		HindsightNotes:    cleanNotes,
+	}
+	if createdAt != nil && !createdAt.IsZero() {
+		eval.CreatedAt = *createdAt
 	}
 
 	return s.repo.UpsertEvaluation(ctx, eval, userID)
