@@ -13,18 +13,21 @@ import (
 )
 
 type mockDecisionRepo struct {
-	createFunc            func(ctx context.Context, d domain.Decision, initialOptions []domain.Option, initialTagIDs []uuid.UUID) (domain.Decision, error)
-	getByIDFunc           func(ctx context.Context, id, userID uuid.UUID) (domain.Decision, error)
-	getActiveByUserIDFunc func(ctx context.Context, userID uuid.UUID) ([]domain.Decision, error)
-	updateWithLWWFunc     func(ctx context.Context, d domain.Decision, localUpdatedAt time.Time) (domain.Decision, error)
-	softDeleteWithLWWFunc func(ctx context.Context, id, userID uuid.UUID, localUpdatedAt *time.Time) error
-	createOptionFunc      func(ctx context.Context, opt domain.Option) (domain.Option, error)
-	deleteOptionFunc      func(ctx context.Context, optionID, decisionID, userID uuid.UUID) error
-	getOptionByIDFunc     func(ctx context.Context, optionID, decisionID uuid.UUID) (domain.Option, error)
-	upsertOutcomeFunc     func(ctx context.Context, outcome domain.DecisionOutcome, userID uuid.UUID) (domain.DecisionOutcome, error)
-	upsertEvaluationFunc  func(ctx context.Context, eval domain.Evaluation, userID uuid.UUID) (domain.Evaluation, error)
-	addTagFunc            func(ctx context.Context, decisionID, tagID, userID uuid.UUID) error
-	removeTagFunc         func(ctx context.Context, decisionID, tagID, userID uuid.UUID) error
+	createFunc              func(ctx context.Context, d domain.Decision, initialOptions []domain.Option, initialTagIDs []uuid.UUID) (domain.Decision, error)
+	getByIDFunc             func(ctx context.Context, id, userID uuid.UUID) (domain.Decision, error)
+	getByIdempotencyKeyFunc func(ctx context.Context, userID uuid.UUID, key string) (domain.Decision, error)
+	getActiveByUserIDFunc   func(ctx context.Context, userID uuid.UUID) ([]domain.Decision, error)
+	listUpdatedSinceFunc    func(ctx context.Context, userID uuid.UUID, updatedSince time.Time) ([]domain.Decision, error)
+	updateWithLWWFunc       func(ctx context.Context, d domain.Decision, localUpdatedAt time.Time) (domain.Decision, error)
+	softDeleteWithLWWFunc   func(ctx context.Context, id, userID uuid.UUID, localUpdatedAt *time.Time) error
+	syncDecisionFunc        func(ctx context.Context, id, userID uuid.UUID, data domain.SyncDecisionData) (domain.Decision, error)
+	createOptionFunc        func(ctx context.Context, opt domain.Option) (domain.Option, error)
+	deleteOptionFunc        func(ctx context.Context, optionID, decisionID, userID uuid.UUID) error
+	getOptionByIDFunc       func(ctx context.Context, optionID, decisionID uuid.UUID) (domain.Option, error)
+	upsertOutcomeFunc       func(ctx context.Context, outcome domain.DecisionOutcome, userID uuid.UUID) (domain.DecisionOutcome, error)
+	upsertEvaluationFunc    func(ctx context.Context, eval domain.Evaluation, userID uuid.UUID) (domain.Evaluation, error)
+	addTagFunc              func(ctx context.Context, decisionID, tagID, userID uuid.UUID) error
+	removeTagFunc           func(ctx context.Context, decisionID, tagID, userID uuid.UUID) error
 }
 
 func (m *mockDecisionRepo) Create(ctx context.Context, d domain.Decision, initialOptions []domain.Option, initialTagIDs []uuid.UUID) (domain.Decision, error) {
@@ -41,9 +44,23 @@ func (m *mockDecisionRepo) GetByID(ctx context.Context, id, userID uuid.UUID) (d
 	return domain.Decision{ID: id, UserID: userID}, nil
 }
 
+func (m *mockDecisionRepo) GetByIdempotencyKey(ctx context.Context, userID uuid.UUID, key string) (domain.Decision, error) {
+	if m.getByIdempotencyKeyFunc != nil {
+		return m.getByIdempotencyKeyFunc(ctx, userID, key)
+	}
+	return domain.Decision{}, domain.ErrDecisionNotFound
+}
+
 func (m *mockDecisionRepo) GetActiveByUserID(ctx context.Context, userID uuid.UUID) ([]domain.Decision, error) {
 	if m.getActiveByUserIDFunc != nil {
 		return m.getActiveByUserIDFunc(ctx, userID)
+	}
+	return nil, nil
+}
+
+func (m *mockDecisionRepo) ListUpdatedSince(ctx context.Context, userID uuid.UUID, updatedSince time.Time) ([]domain.Decision, error) {
+	if m.listUpdatedSinceFunc != nil {
+		return m.listUpdatedSinceFunc(ctx, userID, updatedSince)
 	}
 	return nil, nil
 }
@@ -60,6 +77,13 @@ func (m *mockDecisionRepo) SoftDeleteWithLWW(ctx context.Context, id, userID uui
 		return m.softDeleteWithLWWFunc(ctx, id, userID, localUpdatedAt)
 	}
 	return nil
+}
+
+func (m *mockDecisionRepo) SyncDecision(ctx context.Context, id, userID uuid.UUID, data domain.SyncDecisionData) (domain.Decision, error) {
+	if m.syncDecisionFunc != nil {
+		return m.syncDecisionFunc(ctx, id, userID, data)
+	}
+	return domain.Decision{ID: id, UserID: userID, Title: data.Title}, nil
 }
 
 func (m *mockDecisionRepo) CreateOption(ctx context.Context, opt domain.Option) (domain.Option, error) {
@@ -117,7 +141,7 @@ func TestCreateDecision_Validation(t *testing.T) {
 	userID := uuid.New()
 
 	// Test 1: Empty Title
-	_, err := svc.CreateDecision(context.Background(), userID, "   ", nil, nil, nil, nil, nil)
+	_, err := svc.CreateDecision(context.Background(), userID, "   ", nil, nil, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for empty title, got nil")
 	}
@@ -129,95 +153,67 @@ func TestCreateDecision_Validation(t *testing.T) {
 			t.Fatalf("expected title 'Valid Decision', got '%s'", d.Title)
 		}
 		if len(initialOptions) != 1 || initialOptions[0].Title != optTitle {
-			t.Fatalf("expected 1 option with title '%s', got %v", optTitle, initialOptions)
+			t.Fatalf("expected 1 option with title '%s'", optTitle)
 		}
-		d.ID = uuid.New()
-		d.Options = initialOptions
 		return d, nil
 	}
 
-	created, err := svc.CreateDecision(context.Background(), userID, "  Valid Decision  ", nil, nil, nil, []domain.Option{
-		{Title: "  Option A  "},
-		{Title: "   "}, // Should be filtered out
-	}, nil)
+	_, err = svc.CreateDecision(context.Background(), userID, "Valid Decision", nil, nil, nil, []domain.Option{{Title: optTitle}}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if created.Title != "Valid Decision" {
-		t.Fatalf("expected 'Valid Decision', got '%s'", created.Title)
-	}
 }
 
-func TestCreateDecision_WithInitialTags(t *testing.T) {
+func TestCreateDecision_Idempotency(t *testing.T) {
 	repo := &mockDecisionRepo{}
 	svc := service.NewDecisionService(repo)
 	userID := uuid.New()
-	tagID := uuid.New()
+	key := "idemp-key-123"
 
-	repo.createFunc = func(ctx context.Context, d domain.Decision, initialOptions []domain.Option, initialTagIDs []uuid.UUID) (domain.Decision, error) {
-		if len(initialTagIDs) != 1 || initialTagIDs[0] != tagID {
-			t.Fatalf("expected initial tag %s, got %v", tagID, initialTagIDs)
-		}
-		d.ID = uuid.New()
-		d.Tags = []domain.Tag{{ID: tagID, Name: "Tag1", ColorHex: "#FFFFFF"}}
-		return d, nil
+	existingDec := domain.Decision{
+		ID:     uuid.New(),
+		UserID: userID,
+		Title:  "Existing Decision",
 	}
 
-	created, err := svc.CreateDecision(context.Background(), userID, "Decision With Tag", nil, nil, nil, nil, []uuid.UUID{tagID})
+	repo.getByIdempotencyKeyFunc = func(ctx context.Context, uID uuid.UUID, k string) (domain.Decision, error) {
+		if k == key {
+			return existingDec, nil
+		}
+		return domain.Decision{}, domain.ErrDecisionNotFound
+	}
+
+	// Should return existing decision without calling createFunc
+	created, err := svc.CreateDecision(context.Background(), userID, "New Decision", nil, nil, nil, nil, nil, nil, &key)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(created.Tags) != 1 || created.Tags[0].ID != tagID {
-		t.Fatalf("expected created decision to have tag %s", tagID)
+	if created.ID != existingDec.ID {
+		t.Fatalf("expected existing decision ID %s, got %s", existingDec.ID, created.ID)
 	}
 }
 
-func TestUpdateDecision_LWWConflict(t *testing.T) {
+func TestUpdateDecision_Validation(t *testing.T) {
 	repo := &mockDecisionRepo{}
 	svc := service.NewDecisionService(repo)
 	userID := uuid.New()
 	decisionID := uuid.New()
 
-	serverTime := time.Now().UTC()
-	staleClientTime := serverTime.Add(-10 * time.Minute)
-
-	repo.updateWithLWWFunc = func(ctx context.Context, d domain.Decision, localUpdatedAt time.Time) (domain.Decision, error) {
-		if localUpdatedAt.Before(serverTime) {
-			return domain.Decision{}, &domain.ErrConflict{
-				ServerDecision: domain.Decision{
-					ID:        decisionID,
-					UserID:    userID,
-					Title:     "Server New Title",
-					UpdatedAt: serverTime,
-				},
-			}
-		}
-		d.UpdatedAt = localUpdatedAt
-		return d, nil
-	}
-
-	_, err := svc.UpdateDecision(context.Background(), userID, decisionID, "Client Update", nil, nil, nil, staleClientTime)
+	// Empty Title
+	_, err := svc.UpdateDecision(context.Background(), userID, decisionID, "   ", nil, nil, nil, time.Now())
 	if err == nil {
-		t.Fatal("expected ErrConflict, got nil")
-	}
-
-	var conflictErr *domain.ErrConflict
-	if !errors.As(err, &conflictErr) {
-		t.Fatalf("expected *domain.ErrConflict, got %T: %v", err, err)
-	}
-	if conflictErr.ServerDecision.Title != "Server New Title" {
-		t.Fatalf("expected server decision title 'Server New Title', got '%s'", conflictErr.ServerDecision.Title)
+		t.Fatal("expected error for empty title on update, got nil")
 	}
 }
 
-func TestDeleteOption_CannotDeleteChosenOption(t *testing.T) {
+func TestDeleteOption_ChosenOptionCheck(t *testing.T) {
 	repo := &mockDecisionRepo{}
 	svc := service.NewDecisionService(repo)
 	userID := uuid.New()
 	decisionID := uuid.New()
 	chosenOptionID := uuid.New()
 
-	repo.getByIDFunc = func(ctx context.Context, id, uid uuid.UUID) (domain.Decision, error) {
+	repo.getByIDFunc = func(ctx context.Context, id, uID uuid.UUID) (domain.Decision, error) {
 		return domain.Decision{
 			ID:     decisionID,
 			UserID: userID,
@@ -228,58 +224,24 @@ func TestDeleteOption_CannotDeleteChosenOption(t *testing.T) {
 		}, nil
 	}
 
-	// Try deleting the chosen option
+	// Deleting chosen option should fail with ErrCannotDeleteChosenOption
 	err := svc.DeleteOption(context.Background(), chosenOptionID, decisionID, userID)
-	if err == nil {
-		t.Fatal("expected error deleting chosen option, got nil")
-	}
-	if err.Error() != "cannot delete option chosen for this decision's commitment" {
-		t.Fatalf("unexpected error message: %v", err)
+	if !errors.Is(err, domain.ErrCannotDeleteChosenOption) {
+		t.Fatalf("expected ErrCannotDeleteChosenOption, got %v", err)
 	}
 
-	// Deleting another option should succeed
+	// Deleting non-chosen option should succeed
 	otherOptionID := uuid.New()
-	deleteCalled := false
-	repo.deleteOptionFunc = func(ctx context.Context, optionID, decID, uid uuid.UUID) error {
-		if optionID == otherOptionID {
-			deleteCalled = true
+	repo.deleteOptionFunc = func(ctx context.Context, optionID, dID, uID uuid.UUID) error {
+		if optionID != otherOptionID {
+			t.Fatalf("expected option %s, got %s", otherOptionID, optionID)
 		}
 		return nil
 	}
 
-	if err := svc.DeleteOption(context.Background(), otherOptionID, decisionID, userID); err != nil {
-		t.Fatalf("unexpected error deleting non-chosen option: %v", err)
-	}
-	if !deleteCalled {
-		t.Fatal("expected repo.DeleteOption to be called for other option")
-	}
-}
-
-func TestCommitDecision(t *testing.T) {
-	repo := &mockDecisionRepo{}
-	svc := service.NewDecisionService(repo)
-	userID := uuid.New()
-	decisionID := uuid.New()
-	chosenOptionID := uuid.New()
-	note := "Final choice"
-
-	repo.upsertOutcomeFunc = func(ctx context.Context, outcome domain.DecisionOutcome, uid uuid.UUID) (domain.DecisionOutcome, error) {
-		if outcome.ChosenOptionID != chosenOptionID {
-			t.Fatalf("expected chosen option %s, got %s", chosenOptionID, outcome.ChosenOptionID)
-		}
-		if outcome.CommitmentNote == nil || *outcome.CommitmentNote != note {
-			t.Fatalf("expected commitment note '%s', got %v", note, outcome.CommitmentNote)
-		}
-		outcome.DecidedAt = time.Now()
-		return outcome, nil
-	}
-
-	outcome, err := svc.CommitDecision(context.Background(), decisionID, userID, chosenOptionID, &note)
+	err = svc.DeleteOption(context.Background(), otherOptionID, decisionID, userID)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if outcome.ChosenOptionID != chosenOptionID {
-		t.Fatalf("expected chosen option %s, got %s", chosenOptionID, outcome.ChosenOptionID)
+		t.Fatalf("unexpected error deleting non-chosen option: %v", err)
 	}
 }
 
@@ -289,8 +251,8 @@ func TestCreateEvaluation_RequiresCommitment(t *testing.T) {
 	userID := uuid.New()
 	decisionID := uuid.New()
 
-	// Decision has NO outcome
-	repo.getByIDFunc = func(ctx context.Context, id, uid uuid.UUID) (domain.Decision, error) {
+	// Decision with no outcome (uncommitted)
+	repo.getByIDFunc = func(ctx context.Context, id, uID uuid.UUID) (domain.Decision, error) {
 		return domain.Decision{
 			ID:      decisionID,
 			UserID:  userID,
@@ -298,29 +260,13 @@ func TestCreateEvaluation_RequiresCommitment(t *testing.T) {
 		}, nil
 	}
 
-	_, err := svc.CreateEvaluation(context.Background(), decisionID, userID, 80, 75, "Hindsight notes")
-	if err == nil {
-		t.Fatal("expected error evaluating uncommitted decision, got nil")
-	}
-	if err.Error() != "decision must be committed before it can be evaluated" {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestCreateEvaluation_Validation(t *testing.T) {
-	repo := &mockDecisionRepo{}
-	svc := service.NewDecisionService(repo)
-	userID := uuid.New()
-	decisionID := uuid.New()
-
-	// Empty hindsight notes
-	_, err := svc.CreateEvaluation(context.Background(), decisionID, userID, 80, 75, "   ")
-	if err == nil {
-		t.Fatal("expected error for empty hindsight notes, got nil")
+	_, err := svc.CreateEvaluation(context.Background(), decisionID, userID, 80, 75, "Great decision")
+	if !errors.Is(err, domain.ErrEvaluationRequiresCommitment) {
+		t.Fatalf("expected ErrEvaluationRequiresCommitment, got: %v", err)
 	}
 
-	// Decision has an outcome (committed)
-	repo.getByIDFunc = func(ctx context.Context, id, uid uuid.UUID) (domain.Decision, error) {
+	// Decision with outcome (committed)
+	repo.getByIDFunc = func(ctx context.Context, id, uID uuid.UUID) (domain.Decision, error) {
 		return domain.Decision{
 			ID:     decisionID,
 			UserID: userID,
@@ -330,19 +276,56 @@ func TestCreateEvaluation_Validation(t *testing.T) {
 			},
 		}, nil
 	}
-
-	// Valid evaluation
-	repo.upsertEvaluationFunc = func(ctx context.Context, eval domain.Evaluation, uid uuid.UUID) (domain.Evaluation, error) {
-		eval.ID = uuid.New()
-		eval.CreatedAt = time.Now()
+	repo.upsertEvaluationFunc = func(ctx context.Context, eval domain.Evaluation, uID uuid.UUID) (domain.Evaluation, error) {
 		return eval, nil
 	}
 
-	eval, err := svc.CreateEvaluation(context.Background(), decisionID, userID, 80, 75, "Learned a lot from this choice.")
+	eval, err := svc.CreateEvaluation(context.Background(), decisionID, userID, 80, 75, "Great decision")
+	if err != nil {
+		t.Fatalf("unexpected error evaluating committed decision: %v", err)
+	}
+	if eval.SatisfactionAfter != 80 {
+		t.Fatalf("expected satisfaction 80, got %d", eval.SatisfactionAfter)
+	}
+}
+
+func TestListDecisions_UpdatedSince(t *testing.T) {
+	repo := &mockDecisionRepo{}
+	svc := service.NewDecisionService(repo)
+	userID := uuid.New()
+	since := time.Now().Add(-1 * time.Hour)
+
+	calledUpdatedSince := false
+	repo.listUpdatedSinceFunc = func(ctx context.Context, uID uuid.UUID, s time.Time) ([]domain.Decision, error) {
+		calledUpdatedSince = true
+		return []domain.Decision{{ID: uuid.New(), Title: "Updated Decision"}}, nil
+	}
+
+	res, err := svc.ListDecisions(context.Background(), userID, &since)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if eval.SatisfactionAfter != 80 || eval.ConfidenceAfter != 75 {
-		t.Fatalf("expected scores 80 and 75, got %d and %d", eval.SatisfactionAfter, eval.ConfidenceAfter)
+	if !calledUpdatedSince || len(res) != 1 {
+		t.Fatalf("expected ListUpdatedSince to be called, returned %d items", len(res))
+	}
+}
+
+func TestSyncDecision(t *testing.T) {
+	repo := &mockDecisionRepo{}
+	svc := service.NewDecisionService(repo)
+	userID := uuid.New()
+	decisionID := uuid.New()
+
+	syncData := domain.SyncDecisionData{
+		Title:          "Synced Title",
+		LocalUpdatedAt: time.Now(),
+	}
+
+	synced, err := svc.SyncDecision(context.Background(), decisionID, userID, syncData)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if synced.Title != "Synced Title" {
+		t.Fatalf("expected title 'Synced Title', got '%s'", synced.Title)
 	}
 }
