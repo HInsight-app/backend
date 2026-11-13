@@ -40,7 +40,7 @@ func (ctrl *AuthController) Register(c echo.Context) error {
 	// 2. Bind Request
 	var req request.RegisterRequest
 	if err = c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
+		return errorResponse(c, http.StatusBadRequest, errInvalidPayload)
 	}
 
 	// 3. Validate Request
@@ -71,7 +71,7 @@ func (ctrl *AuthController) Login(c echo.Context) error {
 	// 2. Bind Request
 	var req request.LoginRequest
 	if err = c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
+		return errorResponse(c, http.StatusBadRequest, errInvalidPayload)
 	}
 
 	// 3. Validate Request
